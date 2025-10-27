@@ -8,22 +8,17 @@ class MonthStat {
   MonthStat(this.monthLabel, this.value);
 }
 
-/// ---- ตัวอย่างหน้า Trends/Progress ----
-/// ใช้ Stack + ภาพพื้นหลัง + แท่งนอนแนวซ้าย
+/// ---- หน้า Progress/Trends (ตัดรูปพื้นหลังทิ้ง) ----
 class ProgressScreen extends StatelessWidget {
   const ProgressScreen({
     super.key,
     this.title = 'Month',
-    this.backgroundAsset = 'assets/bg/map_blur.jpg',
     this.stats,
     this.onMenu,
   });
 
   /// ชื่อแกนใหญ่ด้านซ้ายบน
   final String title;
-
-  /// รูปพื้นหลัง (ใส่ไฟล์ของคุณและประกาศใน pubspec.yaml)
-  final String backgroundAsset;
 
   /// ข้อมูลต่อเดือน (ถ้าไม่ส่งมา จะใช้ mock ด้านล่าง)
   final List<MonthStat>? stats;
@@ -50,12 +45,15 @@ class ProgressScreen extends StatelessWidget {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // พื้นหลัง
-          Image.asset(backgroundAsset, fit: BoxFit.cover),
-          // เบลออ่อน ๆ ให้อ่านค่าได้ชัดขึ้น
-          BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 2.0, sigmaY: 2.0),
-            child: Container(color: Colors.black.withOpacity(0.12)),
+          // ✅ พื้นหลังแบบกราเดียนท์ (ไม่ต้องใช้ asset)
+          Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                colors: [Color(0xFFF7F3FF), Color(0xFFEDE7FF)],
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+              ),
+            ),
           ),
 
           // เนื้อหาหลัก: ชื่อแกน + เส้นแกน + แท่ง
@@ -119,7 +117,7 @@ class ProgressScreen extends StatelessWidget {
             ),
           ),
 
-          // ปุ่มเมนูมุมซ้ายบน
+          // ปุ่มเมนูมุมซ้ายบน (ถ้าอยากซ่อนก็ไม่ส่ง onMenu มาก็ได้)
           SafeArea(
             child: Align(
               alignment: Alignment.topLeft,
@@ -196,10 +194,13 @@ class _MonthBarRow extends StatelessWidget {
         Expanded(
           child: LayoutBuilder(
             builder: (context, cons) {
-              final w = (cons.maxWidth * value).clamp(0, cons.maxWidth);
+              final double w = (cons.maxWidth * value).clamp(
+                0.0,
+                cons.maxWidth,
+              );
               return Stack(
                 children: [
-                  // เฟรมเทาอ่อนให้เหมือน wire
+                  // เฟรมเทาอ่อน
                   Container(
                     height: 36,
                     decoration: BoxDecoration(
@@ -211,8 +212,7 @@ class _MonthBarRow extends StatelessWidget {
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 450),
                     curve: Curves.easeOutCubic,
-                    width: w.toDouble(),
-
+                    width: w, // <-- เป็น double แล้ว
                     height: 36,
                     decoration: BoxDecoration(
                       color: barColor,
@@ -255,7 +255,7 @@ class _CircleIconButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final w = 48.0;
+    const w = 48.0;
     return GestureDetector(
       onTap: onTap,
       child: Container(
