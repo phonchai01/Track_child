@@ -1,9 +1,8 @@
 // lib/main.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
-
 import 'routes.dart';
-import 'features/templates/template_picker_screen.dart'; // <- ใช้เป็น home
+import 'features/profiles/profile_list_screen.dart'; // <- ใช้เป็น home
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,7 +36,7 @@ class ColoringApp extends StatelessWidget {
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.deepPurple),
 
       // แสดงหน้าเลือกเทมเพลตเป็นหน้าแรก (ลดความเสี่ยงชื่อ route เพี้ยน)
-      home: const TemplatePickerScreen(),
+      home: const ProfileListScreen(),
 
       // ยังให้ onGenerateRoute ใช้งานได้ตามเดิมเวลานำทาง
       onGenerateRoute: AppRouter.onGenerateRoute,
