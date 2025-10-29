@@ -8,6 +8,7 @@ import 'features/result/result_summary_screen.dart';
 import 'features/history/history_list_screen.dart';
 import 'features/trends/trends_screen.dart';
 import 'features/trends/progress_screen.dart';
+import 'features/profiles/profile_list_screen.dart'; // <- ใช้เป็น home
 
 class AppRoutes {
   static const templates = '/templates';
@@ -16,6 +17,7 @@ class AppRoutes {
   static const result = '/result';
   static const history = '/history';
   static const trends = '/trends';
+  static const profiles = '/profiles';
 }
 
 class AppRouter {
@@ -35,7 +37,8 @@ class AppRouter {
 
       case AppRoutes.processing:
         return MaterialPageRoute(
-          builder: (_) => const ProcessingScreen(),
+          builder: (_) =>
+              const ProcessingScreen(maskAssetPath: '', templateAssetPath: ''),
           settings: settings, // ✅ ส่ง args ต่อให้หน้าประมวลผลด้วย
         );
 
@@ -58,10 +61,14 @@ class AppRouter {
         );
       case AppRoutes.trends:
         return MaterialPageRoute(builder: (_) => const ProgressScreen());
-
+      case AppRoutes.templates:
+        return MaterialPageRoute(
+          builder: (_) => const ProfileListScreen(),
+          settings: settings, // ✅ ใส่ไว้ให้เหมือนกัน
+        );
       default:
         return MaterialPageRoute(
-          builder: (_) => const TemplatePickerScreen(),
+          builder: (_) => const ProfileListScreen(),
           settings: settings,
         );
     }

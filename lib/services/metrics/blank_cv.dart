@@ -1,66 +1,107 @@
 // lib/services/metrics/blank_cv.dart
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
-/// ----------------- Tunable thresholds -----------------
-const double _kWhiteThr = 245.0; // กันกระดาษขาวจัด
-const int _kMinGray = 60; // ตัดพิกเซลมืด (เส้น/เงา)
-const int _kSatThr = 40; // S > 40 ถือว่าเป็น “สีจริง”
+/// ---- พารามิเตอร์ปรับแต่ง ----
+/// S ขั้นต่ำที่ถือว่า "มีสีจริง"
+const int _kSatThr = 38;
 
-cv.Mat _rectK(int k) => cv.getStructuringElement(0, (k, k)); // 0 = MORPH_RECT
+/// ความต่างที่อนุโลมสำหรับพาสเทลเทียบกับ "ขาวโลคัล"
+const int _kPastelAllowance = 12;
 
-/// คำนวณ “สัดส่วนพื้นที่ว่าง (ยังไม่ระบาย)” ภายในเส้น (0..1)
-/// - gray: ช่องสีเทา (BGR2GRAY)
-/// - sat: ช่อง Saturation (จาก HSV)
-/// - inLineMask: mask บริเวณในเส้น (0/255)
+/// เกณฑ์ V (จาก gray) ที่ถือว่า "ดำมาก" ⇒ นับเป็นการทาแม้ S จะต่ำ
+/// ลองปรับ 100–140 ตามวัสดุที่ใช้ (ดินสอ/ปากกา)
+const int _kDarkInkMax = 130;
+
+/// เคอร์เนลสำหรับ morphology
+const int _kOpenKernel = 3;
+const int _kEdgeDilate = 1;
+const int _kErodeMaskPx = 1;
+
+cv.Mat _rectK(int k) => cv.getStructuringElement(0 /*MORPH_RECT*/, (k, k));
+cv.Mat _ellipK(int k) => cv.getStructuringElement(2 /*MORPH_ELLIPSE*/, (k, k));
+
+/// คำนวณสัดส่วน "พื้นที่ยังว่าง" ภายในเส้น (0..1)
+/// รวม 3 แหล่งที่นับเป็นการทา: (1) S สูง, (2) พาสเทลเข้มกว่าขาวโลคัล,
+/// (3) สีดำ/หมึก/ดินสอที่มืดมาก (V ต่ำ)
 Future<double> computeBlank(cv.Mat gray, cv.Mat sat, cv.Mat inLineMask) async {
-  final int area = cv.countNonZero(inLineMask);
-  if (area <= 0) return 1.0; // ถ้าไม่มีพื้นที่ในเส้นเลย → ถือว่าว่างเต็ม
+  // เบลอเล็กน้อยกัน noise
+  final cv.Mat grayMed = cv.medianBlur(gray, 3);
 
-  // 1) พื้นที่ที่มีสี (S > _kSatThr)
+  // 1) ภายในเส้นแบบปลอดภัย (ร่นเข้าเล็กน้อยกันติดเส้น)
+  final cv.Mat maskSafe = cv.erode(inLineMask, _ellipK(_kErodeMaskPx));
+  final int area = cv.countNonZero(maskSafe);
+  if (area <= 0) return 1.0;
+
+  // 2) สีจริงจาก S
   final cv.Mat satMask = cv
-      .threshold(sat, _kSatThr.toDouble(), 255.0, 0)
-      .$2; // THRESH_BINARY
+      .threshold(sat, _kSatThr.toDouble(), 255.0, 0 /*BINARY*/)
+      .$2;
 
-  // 2) ไม่ขาวจัด และไม่ดำ (ไม่ใช่เส้น)
-  final cv.Mat notWhite = cv
-      .threshold(gray, _kWhiteThr, 255.0, 1)
-      .$2; // THRESH_BINARY_INV
-  final cv.Mat notDark = cv
-      .threshold(gray, _kMinGray.toDouble(), 255.0, 0)
-      .$2; // THRESH_BINARY
+  // 3) พาสเทลเทียบ "ขาวโลคัล"
+  final cv.Mat localWhite = cv.gaussianBlur(grayMed, (31, 31), 0);
+  final cv.Mat constVal = cv.Mat.zeros(
+    localWhite.rows,
+    localWhite.cols,
+    localWhite.type,
+  )..setTo(cv.Scalar.all(_kPastelAllowance.toDouble()));
+  final cv.Mat pastelAllow = cv.subtract(localWhite, constVal);
+  final cv.Mat pastelMaskLocal = cv
+      .threshold(
+        cv.max(
+          pastelAllow,
+          cv.Mat.zeros(pastelAllow.rows, pastelAllow.cols, pastelAllow.type),
+        ),
+        0.0,
+        255.0,
+        1 /*BINARY_INV: gray < (localWhite-allow) → 255*/,
+      )
+      .$2;
 
-  // 3) colored = satMask AND notWhite AND notDark
-  final cv.Mat colored1 = cv.Mat.zeros(
-    satMask.rows,
-    satMask.cols,
-    satMask.type,
+  // 4) ดำมาก (ดินสอ/หมึก) – ใช้ V ต่ำจาก gray
+  final cv.Mat veryDark = cv
+      .threshold(grayMed, _kDarkInkMax.toDouble(), 255.0, 1 /*BINARY_INV*/)
+      .$2;
+
+  // 5) รวมผู้สมัครว่า "ทาแล้ว"
+  final cv.Mat coloredCandidate = cv.max(
+    cv.max(satMask, pastelMaskLocal),
+    veryDark,
   );
-  satMask.copyTo(colored1, mask: notWhite);
 
-  final cv.Mat colored = cv.Mat.zeros(
-    colored1.rows,
-    colored1.cols,
-    colored1.type,
+  // 6) ลบเส้นขอบด้วย Canny + Dilate แล้วกลับขั้วเป็น mask keep
+  final cv.Mat edges = cv.canny(grayMed, 60, 120);
+  final cv.Mat edgesDil = cv.dilate(edges, _rectK(_kEdgeDilate));
+  final cv.Mat edgesInv = cv
+      .threshold(edgesDil, 0.0, 255.0, 1 /*BINARY_INV*/)
+      .$2;
+
+  // กรองเส้นออก
+  final cv.Mat coloredNoEdge = cv.Mat.zeros(
+    coloredCandidate.rows,
+    coloredCandidate.cols,
+    coloredCandidate.type,
   );
-  colored1.copyTo(colored, mask: notDark);
+  coloredCandidate.copyTo(coloredNoEdge, mask: edgesInv);
 
-  // 4) จำกัดให้นับเฉพาะ “ในเส้น”
+  // 7) จำกัดเฉพาะภายในเส้น และเปิดรูเพื่อล้าง noise จุดเล็ก ๆ
   final cv.Mat coloredIn = cv.Mat.zeros(
-    colored.rows,
-    colored.cols,
-    colored.type,
+    coloredNoEdge.rows,
+    coloredNoEdge.cols,
+    coloredNoEdge.type,
   );
-  colored.copyTo(coloredIn, mask: inLineMask);
+  coloredNoEdge.copyTo(coloredIn, mask: maskSafe);
 
-  // 5) ล้าง noise จุดเล็ก ๆ (MORPH_OPEN)
-  final cv.Mat cleaned = cv.morphologyEx(coloredIn, 1, _rectK(3));
+  final cv.Mat cleaned = cv.morphologyEx(
+    coloredIn,
+    1 /*MORPH_OPEN*/,
+    _rectK(_kOpenKernel),
+  );
 
-  // 6) คำนวณสัดส่วนที่ระบายแล้ว
+  // 8) สัดส่วนพื้นที่ที่ถูกทา → Blank = 1 - paintedRatio
   final int coloredCount = cv.countNonZero(cleaned);
-  final double paintedRatio = (coloredCount / area).clamp(0.0, 1.0);
-
-  // ✅ 7) กลับค่าเป็น “blank” (ว่าง) แทน “painted”
-  final double blankRatio = (1.0 - paintedRatio).clamp(0.0, 1.0);
-
-  return blankRatio;
+  final double paintedRatio = (coloredCount.toDouble() / area.toDouble()).clamp(
+    0.0,
+    1.0,
+  );
+  return (1.0 - paintedRatio).clamp(0.0, 1.0);
 }

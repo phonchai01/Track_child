@@ -1,36 +1,36 @@
+// lib/services/metrics/entropy_cv.dart
 import 'dart:math' as math;
 import 'package:opencv_dart/opencv_dart.dart' as cv;
-import '../image/opencv_utils.dart' as utils;
 
 class EntropyCV {
-  /// entropy normalized [0,1] จาก Gray 256 bins
-  static double computeNormalized(cv.Mat bgr) {
-    // 1) แปลงเป็น grayscale
-    final gray = utils.toGray(bgr);
+  /// Shannon entropy normalized [0,1] จาก Gray 8-bit (256 bins)
+  static double computeNormalized(cv.Mat bgr, {cv.Mat? mask}) {
+    final cv.Mat gray = cv.cvtColor(bgr, cv.COLOR_BGR2GRAY);
 
-    // 2) สร้าง histogram
-    final hist = cv.calcHist(
-      gray as cv.VecMat, // ภาพ grayscale
-      [0] as cv.VecI32, // ใช้ช่องที่ 0
-      cv.Mat.empty(), // ไม่มี mask
-      [256] as cv.VecI32, // 256 bins
-      [0, 256] as cv.VecF32, // ค่า intensity 0–255
-    );
+    // อ่านข้อมูลพิกเซล (Uint8List) ออกมาตรงๆ
+    final data = gray.data; // Uint8List ใน opencv_dart
 
-    // 3) คำนวณ entropy
-    final total = gray.rows * gray.cols;
-    double ent = 0.0;
-
-    for (int i = 0; i < 256; i++) {
-      final p = hist.atFloat(i, 0) / total;
-      if (p > 0) ent -= p * (math.log(p) / math.ln2);
+    // นับ histogram ด้วยตัวเอง (เสถียรกว่าใช้ calcHist ของ lib)
+    final List<int> hist = List<int>.filled(256, 0);
+    if (mask == null) {
+      for (int i = 0; i < data.length; i++) hist[data[i]]++;
+    } else {
+      final m = mask.data;
+      for (int i = 0; i < data.length; i++) {
+        if (m[i] != 0) hist[data[i]]++;
+      }
     }
 
-    // normalize ด้วย log2(256)=8
-    return ent / 8.0;
-  }
-}
+    final int total = hist.fold(0, (p, v) => p + v);
+    if (total == 0) return 0.0;
 
-extension on cv.Mat {
-  atFloat(int i, int j) {}
+    double ent = 0.0;
+    for (int i = 0; i < 256; i++) {
+      if (hist[i] == 0) continue;
+      final double p = hist[i] / total;
+      ent -= p * (math.log(p) / math.ln2);
+    }
+    // normalize ด้วย log2(256) = 8
+    return (ent / 8.0).clamp(0.0, 1.0);
+  }
 }

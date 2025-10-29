@@ -58,7 +58,14 @@ class CameraOverlayScreen extends StatelessWidget {
       // ➜ ไปหน้า Processing พร้อมภาพและ templateKey ที่เลือกจริง
       Navigator.of(context).push(
         MaterialPageRoute(
-          builder: (_) => const ProcessingScreen(),
+          builder: (_) => ProcessingScreen(
+            imageBytes: bytes,
+            maskAssetPath:
+                'assets/masks/${templateKey}_mask.png', // โหลด mask ตามชื่อ key
+            showInlineResult: true,
+            templateAssetPath: '',
+          ),
+
           settings: RouteSettings(
             arguments: {
               'imageBytes': bytes,
