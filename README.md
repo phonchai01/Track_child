@@ -25,6 +25,12 @@ flutter emulators --launch Medium_Phone_API_36
 ```bash
 flutter run -d "sdk gphone64 x86 64"
 ```
-
-
+### หน้าที่ใช้ แสดงการคำนวณ อยู่ในนี้
+lib\features\processing\processing_screen.dart
+### หน้าการคำนวณ
+lib\services\metrics
+การคำนวณจะอยู่ในนี้ทั้งหมด 
+4 ค่าหลักคิดว่าเรียบร้อยแล้ว เช็คได้นะถ้าไม่ชัว
+ที่เหลือคือ 
+Z-Score กับ การรวมค่าอะ ทำไม่ได้จริง และการให้คะแนน
 
