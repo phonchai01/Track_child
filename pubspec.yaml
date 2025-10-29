@@ -72,6 +72,7 @@ flutter:
   assets:
     - assets/masks/
     - assets/templates/
+    - assets/masks_out/
     - assets/data/result_metrics.csv
     
   # To add assets to your application, add an assets section, like this:

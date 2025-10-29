@@ -181,43 +181,60 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       }
       final preview = _matToPng(bgr);
 
-      // 2) โหลด MASK สำเร็จรูป แล้ว resize ให้เท่ากับรูปจริง
-      // 2) โหลด MASK สำเร็จรูป แล้วตรวจสอบขั้ว
-      final maskTpl = await _loadBinaryMask(widget.maskAssetPath);
-      final fixedMask = cv.bitwiseNOT(
-        maskTpl,
-      ); // ✅ กลับด้านให้แน่ใจว่า "ขาว = ภายในเส้น"
-      cv.Mat _ensureWhiteIsInside(cv.Mat m) {
-        if (m.channels > 1) m = cv.cvtColor(m, cv.COLOR_BGR2GRAY);
-        m = cv.threshold(m, 127.0, 255.0, 0 /*BINARY*/).$2;
-        final total = m.rows * m.cols;
-        final white = cv.countNonZero(m);
-        if (white < total / 2) {
-          m = cv.bitwiseNOT(m);
-        }
-        return m;
+      // 2) โหลด MASK (แยกในเส้น/นอกเส้น)
+      // ---- ภายในเส้น: ใช้ assets/masks/*.png ----
+      final maskInRaw = await _loadBinaryMask(widget.maskAssetPath);
+      final insideRaw = ensureWhiteIsInside(maskInRaw); // ให้แน่ใจว่า "ขาว=ภายใน"
+      final inside = cv.resize(
+        insideRaw,
+        (bgr.cols, bgr.rows),
+        interpolation: cv.INTER_NEAREST, // รักษาบิตของมาสก์
+      );
+      final insideSafe = shrinkInsideForSafeCount(inside, px: 1); // กันติดเส้นพิมพ์
+
+      // ---- ภายนอกเส้น (สำหรับ COTL): ใช้ assets/masks_out/*_mask_out.png ----
+      final maskOutPath = widget.maskAssetPath
+          .replaceAll('assets/masks/', 'assets/masks_out/')
+          .replaceAll('_mask', '_mask_out');
+
+      cv.Mat insideForCotlSafe;
+      try {
+        final maskOutRaw = await _loadBinaryMask(maskOutPath);
+        // ใน masks_out: "ดำ=ภายใน, ขาว=ภายนอก" → กลับให้เป็น "ขาว=ภายใน"
+        final insideFromOut = ensureWhiteIsInside(cv.bitwiseNOT(maskOutRaw));
+        final insideFromOutResized = cv.resize(
+          insideFromOut,
+          (bgr.cols, bgr.rows),
+          interpolation: cv.INTER_NEAREST,
+        );
+        insideForCotlSafe = shrinkInsideForSafeCount(insideFromOutResized, px: 1);
+      } catch (_) {
+        // ถ้าไม่มีไฟล์ใน masks_out ให้ fallback ใช้ insideSafe
+        insideForCotlSafe = insideSafe;
       }
-
-      final inside = cv.resize(fixedMask, (
-        bgr.cols,
-        bgr.rows,
-      ), interpolation: cv.INTER_NEAREST);
-
-      final insideSafe = shrinkInsideForSafeCount(inside, px: 1);
 
       // 3) channels
       final gray = cv.cvtColor(bgr, cv.COLOR_BGR2GRAY);
-      final sat = _extractS(bgr);
+      final sat  = _extractS(bgr);
 
       // 4) metrics
+      // ---- วัด "ภายในเส้น" ----
       final blank = await computeBlank(gray, sat, insideSafe);
-      final cotl = await computeCotl(gray, sat, insideSafe);
-      final ent = EntropyCV.computeNormalized(bgr, mask: insideSafe);
-      final comp = ComplexityCV.edgeDensity(bgr, mask: insideSafe);
+      final ent   = EntropyCV.computeNormalized(bgr, mask: insideSafe);
+      final comp  = ComplexityCV.edgeDensity(bgr, mask: insideSafe);
+
+      // ---- วัด "นอกเส้น" (COTL) ด้วยมาสก์ภายนอกที่ปรับกลับแล้ว ----
+      final cotl  = await computeCotl(gray, sat, insideForCotlSafe);
+      // ถ้าต้องการแหวน 3 มม. แบบฟิกซ์จริง ๆ ใช้อันนี้แทน:
+      // final cotl = await computeCotl3mm(
+      //   gray, sat, insideForCotlSafe,
+      //   pixelsPerMM: 300.0 / 25.4, // ตัวอย่าง 300 dpi
+      //   ringMM: 3.0,
+      // );
 
       if (!mounted) return;
       setState(() {
-        _previewBytes = preview; // ✅ เก็บพรีวิวไว้แสดง
+        _previewBytes = preview;
         _blank = blank;
         _cotl = cotl;
         _entropy = ent;
@@ -229,6 +246,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       setState(() => _error = e.toString());
     }
   }
+
 
   @override
   Widget build(BuildContext context) {
@@ -303,7 +321,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
           _metricRow('Blank (ในเส้น)', _blank!),
           _metricRow('COTL (นอกเส้น)', _cotl!),
           _metricRow('Entropy (normalized)', _entropy!),
-          _metricRow('Edge density', _complexity!),
+          _metricRow('Complexity', _complexity!),
           const SizedBox(height: 24),
           Text('แนวโน้มค่าที่คาดหวัง:', style: theme.textTheme.titleMedium),
           const SizedBox(height: 8),
