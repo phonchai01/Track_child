@@ -1,114 +1,284 @@
+// lib/services/metrics/blank_cv.dart
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
-/// ---------- โปรไฟล์เกณฑ์ (ค่าเริ่มต้นแบบยืดหยุ่น) ----------
-class _BlankParams {
-  final int satThr;          // S ขั้นต่ำที่ถือว่า "มีสี"
-  final int pastelAllowance; // ส่วนลดเทียบ white-local (ยิ่งมากยิ่งรับสีอ่อน)
-  final int darkInkMax;      // เกณฑ์ V (gray) ที่นับว่า "ดำมาก" => ทาแล้ว
-  final int openKernel;
-  final int edgeDilate;
-  final int erodeMaskPx;
-  const _BlankParams({
-    required this.satThr,
-    required this.pastelAllowance,
-    required this.darkInkMax,
-    this.openKernel = 3,
-    this.edgeDilate = 1,
-    this.erodeMaskPx = 1,
-  });
+const int _kEdgeBandPxDefault = 2;
+const int _kOpenK = 3;
+const int _kCloseK = 3;
+const int _kEqHist = 0;
+const int _kPaperErode = 0;
+
+cv.Mat _rectK(int k) => cv.getStructuringElement(0, (k, k));
+cv.Mat _to8U(cv.Mat m) => (m.type == 0) ? m : cv.convertScaleAbs(m);
+cv.Mat _bin(cv.Mat m) =>
+    cv.threshold(_to8U(m), 0.0, 255.0, cv.THRESH_BINARY).$2;
+
+int _tailGEQuantile(cv.Mat img8, cv.Mat mask, double q) {
+  final area = cv.countNonZero(mask);
+  if (area <= 0) return 255;
+  int lo = 0, hi = 255, ans = 255;
+  while (lo <= hi) {
+    final mid = (lo + hi) >> 1;
+    final bin = cv.threshold(img8, mid.toDouble(), 255.0, cv.THRESH_BINARY).$2;
+    final cnt = cv.countNonZero(cv.bitwiseAND(bin, mask));
+    final ratio = cnt / area;
+    if (ratio >= q) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans;
 }
 
-enum BlankMode { auto, color, pencil }
-
-// โปรไฟล์พื้นฐาน
-const _colorParams  = _BlankParams(satThr: 35, pastelAllowance: 15, darkInkMax: 140);
-const _pencilParams = _BlankParams(satThr: 22, pastelAllowance: 25, darkInkMax: 170);
-
-cv.Mat _rectK(int k)  => cv.getStructuringElement(0, (k, k));
-cv.Mat _ellipK(int k) => cv.getStructuringElement(2, (k, k));
-
-/// เลือกโปรไฟล์อัตโนมัติจากสถิติ S/V ภายในมาสก์
-_BlankParams _autoTune(cv.Mat grayMed, cv.Mat sat, cv.Mat maskSafe) {
-  // สุ่มตัวอย่างหยาบเพื่อลดเวลา
-  final cv.Mat satMasked  = cv.Mat.zeros(sat.rows, sat.cols, sat.type)..setTo(cv.Scalar.all(0));
-  final cv.Mat grayMasked = cv.Mat.zeros(grayMed.rows, grayMed.cols, grayMed.type)..setTo(cv.Scalar.all(255));
-  sat.copyTo(satMasked,  mask: maskSafe);
-  grayMed.copyTo(grayMasked, mask: maskSafe);
-
-  // สถิติง่าย ๆ: ค่ามัธยฐานโดย approx ด้วย blur แล้วหาค่าเฉลี่ย
-  final satMed      = cv.mean(cv.medianBlur(satMasked, 5)).v0;
-  final grayMedMean = cv.mean(grayMasked).v0;
-
-
-  // สัดส่วน "มืดจัด" ภายใน (บอกแนวดินสอ)
-  final vDark = cv.threshold(grayMed, 160.0, 255.0, 1 /*INV*/).$2; // V<160
-  final vDarkIn = cv.Mat.zeros(vDark.rows, vDark.cols, vDark.type);
-  vDark.copyTo(vDarkIn, mask: maskSafe);
-  final darkRatio = cv.countNonZero(vDarkIn) / cv.countNonZero(maskSafe).clamp(1, 1<<30);
-
-  // เงื่อนไขง่าย ๆ:
-  // - S ต่ำ (≤20~25) และมืดเยอะ หรือ V โดยรวมมืด → pencil
-  // - อย่างอื่น → color
-  final isPencil = (satMed <= 24.0 && darkRatio >= 0.12) || (grayMedMean <= 155.0);
-  return isPencil ? _pencilParams : _colorParams;
+class _Params {
+  int sMin, vDark, pastel, grow, tPaper;
+  _Params(this.sMin, this.vDark, this.pastel, this.grow, this.tPaper);
 }
-/// คำนวณสัดส่วน "พื้นที่ยังว่าง" ภายในเส้น (0..1)
-/// รวม 3 แหล่งที่นับเป็นการทา: (1) S สูง, (2) พาสเทลเข้มกว่าขาวโลคัล,
-/// (3) สีดำ/หมึก/ดินสอที่มืดมาก (V ต่ำ) 
-Future<double> computeBlank(
-  cv.Mat gray,
-  cv.Mat sat,
-  cv.Mat inLineMask, {
-  BlankMode mode = BlankMode.auto,   // ✅ เพิ่มโหมด
-}) async {
-  final cv.Mat grayMed = cv.medianBlur(gray, 3);
 
-  // 1) ภายในเส้นแบบปลอดภัย
-  final cv.Mat maskSafe = cv.erode(inLineMask, _ellipK(_colorParams.erodeMaskPx));
-  final int area = cv.countNonZero(maskSafe);
-  if (area <= 0) return 1.0;
+_Params _seedParams(double avgB, int tBright, int tMin, int tMax) {
+  final tPaper = (avgB < 140)
+      ? (tBright + 40).clamp(150, tMax)
+      : tBright.clamp(tMin, tMax);
+  final sMin = 70;
+  final vDark = (avgB < 120) ? 135 : 125;
+  final pastel = (avgB < 120) ? 12 : 16;
+  final grow = (avgB < 120) ? 6 : 8;
+  return _Params(sMin, vDark, pastel, grow, tPaper);
+}
 
-  // 2) เลือกพารามิเตอร์ตามโหมด
-  final _BlankParams p = switch (mode) {
-    BlankMode.color  => _colorParams,
-    BlankMode.pencil => _pencilParams,
-    BlankMode.auto   => _autoTune(grayMed, sat, maskSafe),
-  };
+class _MaskCand {
+  final cv.Mat keep;
+  final int area;
+  final double avg;
+  final bool inv;
+  final int band;
+  _MaskCand(this.keep, this.area, this.avg, this.inv, this.band);
+}
 
-  // 3) สีจริงจาก S
-  final cv.Mat satMask = cv.threshold(sat, p.satThr.toDouble(), 255.0, 0).$2;
+_MaskCand _prepKeep(
+  cv.Mat binMask,
+  cv.Mat grayMed,
+  int defBand, {
+  required bool invFlag,
+}) {
+  final preArea = cv.countNonZero(binMask);
+  final tries = <int>[defBand, 1, 0].toSet().toList()..sort();
+  cv.Mat best = binMask;
+  int bestArea = -1;
+  int bestBand = defBand;
+  for (final b in tries) {
+    final edge = cv.morphologyEx(binMask, cv.MORPH_GRADIENT, _rectK(3));
+    final band = (b > 0) ? cv.dilate(edge, _rectK(1 + 2 * b)) : edge;
+    final keep = cv.bitwiseAND(
+      binMask,
+      cv.threshold(band, 0, 255.0, cv.THRESH_BINARY_INV).$2,
+    );
+    final a = cv.countNonZero(keep);
+    if (a >= preArea * 0.25 && a > bestArea) {
+      best = keep;
+      bestArea = a;
+      bestBand = b;
+    }
+  }
+  if (bestArea < 0) {
+    final edge = cv.morphologyEx(binMask, cv.MORPH_GRADIENT, _rectK(3));
+    final keep = cv.bitwiseAND(
+      binMask,
+      cv.threshold(edge, 0, 255.0, cv.THRESH_BINARY_INV).$2,
+    );
+    best = keep;
+    bestArea = cv.countNonZero(keep);
+    bestBand = 0;
+  }
+  final avg = (bestArea > 0) ? cv.mean(grayMed, mask: best).val[0] : 0.0;
+  return _MaskCand(best, bestArea, avg, invFlag, bestBand);
+}
 
-  // 4) พาสเทลเทียบ "ขาวโลคัล"
-  final cv.Mat localWhite = cv.gaussianBlur(grayMed, (31, 31), 0);
-  final cv.Mat constVal = cv.Mat.zeros(localWhite.rows, localWhite.cols, localWhite.type)
-    ..setTo(cv.Scalar.all(p.pastelAllowance.toDouble()));
-  final cv.Mat pastelAllow = cv.subtract(localWhite, constVal);
-  final cv.Mat pastelMaskLocal = cv.threshold(
-    cv.max(pastelAllow, cv.Mat.zeros(pastelAllow.rows, pastelAllow.cols, pastelAllow.type)),
-    0.0, 255.0, 1 /*INV: gray < (localWhite-allow) */,
-  ).$2;
+class _Measure {
+  final double paintedRatio;
+  final cv.Mat painted;
+  _Measure(this.paintedRatio, this.painted);
+}
 
-  // 5) ดำมาก (ดินสอ/หมึก)
-  final cv.Mat veryDark = cv.threshold(grayMed, p.darkInkMax.toDouble(), 255.0, 1 /*INV*/).$2;
+_Measure _measurePainted(
+  cv.Mat grayMed,
+  cv.Mat satMed,
+  cv.Mat keep,
+  _Params P,
+) {
+  // 1) สีสด (S สูง) และ 2) มืดมาก (gray ต่ำ)
+  cv.Mat painted = cv.max(
+    cv.threshold(satMed, P.sMin.toDouble(), 255.0, cv.THRESH_BINARY).$2,
+    cv.threshold(grayMed, P.vDark.toDouble(), 255.0, cv.THRESH_BINARY_INV).$2,
+  );
 
-  // 6) ลบเส้นขอบเฉพาะส่วน "สี/พาสเทล" เพื่อไม่ลบดินสอเข้มทิ้ง
-  final cv.Mat edges = cv.canny(grayMed, 60, 120);
-  final cv.Mat edgesDil = cv.dilate(edges, _rectK(p.edgeDilate));
-  final cv.Mat edgesInv = cv.threshold(edgesDil, 0.0, 255.0, 1 /*INV*/).$2;
+  // 3) พาสเทลแบบ “Max-White” (ใช้ dilate หา local maximum ของความสว่าง)
+  final localMax = cv.dilate(grayMed, _rectK(31)); // พิกเซลขาวที่สุดในบริเวณ
+  final allow = cv.Mat.zeros(localMax.rows, localMax.cols, localMax.type)
+    ..setTo(cv.Scalar.all(P.pastel.toDouble()));
+  final target = cv.subtract(localMax, allow);
+  final pastelHard = cv
+      .threshold(
+        cv.max(target, cv.Mat.zeros(target.rows, target.cols, target.type)),
+        0.0,
+        255.0,
+        cv.THRESH_BINARY_INV,
+      )
+      .$2; // gray < localMax - allowance
 
-  final cv.Mat colorOrPastel = cv.max(satMask, pastelMaskLocal);
-  final cv.Mat colorOrPastel_NoEdge = cv.Mat.zeros(colorOrPastel.rows, colorOrPastel.cols, colorOrPastel.type);
-  colorOrPastel.copyTo(colorOrPastel_NoEdge, mask: edgesInv);
+  // Gate พาสเทลด้วย S (กันเงาดำ/คราบสกปรก)
+  final sGateThr = (P.sMin * 0.5).clamp(12, 90).toInt();
+  final sGate = cv
+      .threshold(satMed, sGateThr.toDouble(), 255.0, cv.THRESH_BINARY)
+      .$2;
+  final pastelMask = cv.bitwiseAND(pastelHard, sGate);
 
-  // 7) รวมกับ veryDark (ไม่ลบ edge)
-  final cv.Mat coloredNoEdge = cv.max(colorOrPastel_NoEdge, veryDark);
+  painted = cv.max(painted, pastelMask);
 
-  // 8) จำกัดเฉพาะภายใน + ทำความสะอาด
-  final cv.Mat coloredIn = cv.Mat.zeros(coloredNoEdge.rows, coloredNoEdge.cols, coloredNoEdge.type);
-  coloredNoEdge.copyTo(coloredIn, mask: maskSafe);
-  final cv.Mat cleaned = cv.morphologyEx(coloredIn, 1 /*OPEN*/, _rectK(p.openKernel));
+  // Edge guard: ตัดเส้น outline ออก
+  final edges = cv.canny(grayMed, 60, 120);
+  final edgesDil = cv.dilate(edges, _rectK(1 + 2 * _kEdgeBandPxDefault));
+  final edgesInv = cv.threshold(edgesDil, 0.0, 255.0, cv.THRESH_BINARY_INV).$2;
 
-  final int coloredCount = cv.countNonZero(cleaned);
-  final double paintedRatio = (coloredCount.toDouble() / area.toDouble()).clamp(0.0, 1.0);
-  return (1.0 - paintedRatio).clamp(0.0, 1.0);
+  // keep only inside & not edge
+  painted = cv.bitwiseAND(painted, keep);
+  painted = cv.bitwiseAND(painted, edgesInv);
+
+  // ทำความสะอาด
+  painted = cv.morphologyEx(painted, cv.MORPH_OPEN, _rectK(_kOpenK));
+  if (P.grow > 0) painted = cv.dilate(painted, _rectK(P.grow));
+
+  final pr = cv.countNonZero(painted) / cv.countNonZero(keep);
+  return _Measure(pr, painted);
+}
+
+// ปรับการคำนวณพื้นที่ที่ไม่มีการระบายสี
+Future<double> computeBlank(cv.Mat gray, cv.Mat sat, cv.Mat inLineMask) async {
+  final gray8 = _to8U(gray);
+  var sat8 = _to8U(sat);
+
+  var g = gray8.clone();
+  if (_kEqHist == 1) g = cv.equalizeHist(g);
+  final grayMed = cv.medianBlur(g, 3);
+
+  if (sat8.rows != gray8.rows || sat8.cols != gray8.cols) {
+    sat8 = cv.resize(sat8, (
+      gray8.cols,
+      gray8.rows,
+    ), interpolation: cv.INTER_NEAREST);
+  }
+
+  final satMed = cv.medianBlur(sat8, 3);
+
+  // สร้าง mask เพื่อแยกพื้นที่ที่ไม่ระบายสี
+  final m0 = _bin(inLineMask);
+  final m1 = cv.threshold(m0, 0.0, 255.0, cv.THRESH_BINARY_INV).$2;
+
+  // ปรับปรุงการคำนวณพื้นที่ว่าง
+  final c0 = _prepKeep(m0, grayMed, _kEdgeBandPxDefault, invFlag: false);
+  final c1 = _prepKeep(m1, grayMed, _kEdgeBandPxDefault, invFlag: true);
+
+  final total = gray8.rows * gray8.cols;
+  final bad0 = c0.area > total * 0.60 || c0.area < total * 0.05;
+  final bad1 = c1.area > total * 0.60 || c1.area < total * 0.05;
+
+  final cand = bad0 && !bad1
+      ? c1
+      : bad1 && !bad0
+      ? c0
+      : (c1.avg > c0.avg + 1.0 ||
+            ((c1.avg - c0.avg).abs() <= 1.0 && c1.area > c0.area))
+      ? c1
+      : c0;
+
+  final keep = cand.keep;
+  final safeArea = cand.area;
+
+  if (safeArea <= 0) return 1.0;
+
+  // ปรับค่าเฉลี่ยของพื้นที่ที่ไม่มีการระบายสี (Blank Area)
+  final avgB = cand.avg;
+  final qBright = (avgB < 140) ? 0.55 : 0.42;
+  final tBright = _tailGEQuantile(grayMed, keep, qBright);
+
+  int tMin, tMax;
+  if (avgB >= 240) {
+    tMin = 210;
+    tMax = 230;
+  } else if (avgB >= 210) {
+    tMin = 212;
+    tMax = 232;
+  } else if (avgB >= 170) {
+    tMin = 214;
+    tMax = 234;
+  } else {
+    tMin = 216;
+    tMax = 236;
+  }
+
+  var P = _seedParams(avgB, tBright, tMin, tMax);
+
+  // การปรับ Smin จาก s-tail
+  final sTail = _tailGEQuantile(satMed, keep, 0.20);
+  P.sMin = (sTail * 0.80).clamp(24, 110).toInt();
+
+  // วัดครั้งที่ 1
+  _Measure meas = _measurePainted(grayMed, satMed, keep, P);
+
+  // อัปเดตค่าพารามิเตอร์ตามการตรวจวัด
+  const double lo = 0.65, hi = 0.85;
+  for (int it = 0; it < 3; it++) {
+    if (meas.paintedRatio >= lo && meas.paintedRatio <= hi) break;
+
+    if (meas.paintedRatio > hi) {
+      final over = (meas.paintedRatio - hi).clamp(0.0, 0.30);
+      P.sMin = (P.sMin + (14 + 40 * over)).round().clamp(40, 130);
+      P.vDark = (P.vDark + (18 + 45 * over)).round().clamp(140, 200);
+      P.pastel = (P.pastel + (6 + 16 * over)).round().clamp(14, 28);
+      P.grow = (P.grow - 1).clamp(2, 8);
+      P.tPaper = (P.tPaper + (10 + 20 * over)).round().clamp(160, 230);
+    } else {
+      final under = (lo - meas.paintedRatio).clamp(0.0, 0.30);
+      P.sMin = (P.sMin - (10 + 30 * under)).round().clamp(10, 100);
+      P.vDark = (P.vDark - (15 + 40 * under)).round().clamp(100, 190);
+      P.pastel = (P.pastel - (5 + 12 * under)).round().clamp(6, 24);
+      P.grow = (P.grow + 1).clamp(2, 10);
+      P.tPaper = (P.tPaper - (8 + 18 * under)).round().clamp(140, 230);
+    }
+
+    meas = _measurePainted(grayMed, satMed, keep, P);
+  }
+
+  // กระดาษจริง = ขาว & NOT(painted)
+  cv.Mat paper = cv
+      .threshold(grayMed, P.tPaper.toDouble(), 255.0, cv.THRESH_BINARY)
+      .$2;
+  paper = cv.bitwiseAND(paper, keep);
+  paper = cv.bitwiseAND(paper, cv.bitwiseNOT(meas.painted));
+  paper = cv.morphologyEx(paper, cv.MORPH_CLOSE, _rectK(_kCloseK));
+  paper = cv.morphologyEx(paper, cv.MORPH_OPEN, _rectK(_kOpenK));
+  if (_kPaperErode > 0) paper = cv.erode(paper, _rectK(_kPaperErode));
+
+  final paperCnt = cv.countNonZero(paper);
+  final blankPaper = (paperCnt.toDouble() / safeArea).clamp(0.0, 1.0);
+  final blankPainted = (1.0 - meas.paintedRatio).clamp(0.0, 1.0);
+  final blank = (blankPaper < blankPainted ? blankPaper : blankPainted);
+
+  print(
+    'BlankDbg[AUTO]: area=$safeArea paper=$paperCnt blank=${blank.toStringAsFixed(3)} '
+    'avgB=${avgB.toStringAsFixed(1)} Tpaper=${P.tPaper} '
+    'Smin=${P.sMin} vDark=${P.vDark} pastel=${P.pastel} grow=${P.grow} '
+    'tBright=$tBright sTail=$sTail inverted=${cand.inv} bandPx=${cand.band}',
+  );
+
+  return blank;
+}
+
+Future<double> computeBlankFromBgr(cv.Mat bgr, cv.Mat inLineMask) async {
+  final hsv = cv.cvtColor(bgr, cv.COLOR_BGR2HSV);
+  final hs = cv.split(hsv) as List<cv.Mat>;
+  final sat = hs[1];
+  final gray = cv.cvtColor(bgr, cv.COLOR_BGR2GRAY);
+  return computeBlank(gray, sat, inLineMask);
 }

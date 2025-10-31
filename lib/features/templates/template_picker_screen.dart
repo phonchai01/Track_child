@@ -1,12 +1,12 @@
 // lib/features/templates/template_picker_screen.dart
 import 'package:flutter/material.dart';
-// ไม่จำเป็นแล้ว: import '../processing/pick_image_screen.dart';
 import '../processing/processing_screen.dart';
+import '../history/history_list_screen.dart'; // ✅ import เพิ่ม
 
 class TemplateSpec {
-  final String key; // ใช้เป็น id ภายใน เช่น 'fish'
-  final String title; // ชื่อที่โชว์บนการ์ด
-  final String templateAssetPath; // ยังเก็บไว้ได้ เผื่อใช้อย่างอื่นภายหลัง
+  final String key;                 // 'fish' | 'pencil' | 'icecream'
+  final String title;               // ชื่อที่โชว์บนการ์ด (ไทย)
+  final String templateAssetPath;   // ยังเก็บไว้เผื่อใช้ภายหลัง
 
   const TemplateSpec({
     required this.key,
@@ -15,22 +15,21 @@ class TemplateSpec {
   });
 }
 
-// TODO: ปรับ path ให้ตรงกับของคุณ (ตอนนี้ยังไม่ใช้ค่า templateAssetPath ในการคำนวณ)
 const kTemplates = <TemplateSpec>[
   TemplateSpec(
     key: 'fish',
     title: 'ปลา',
-    templateAssetPath: 'assets/templates/templates_fish.png',
+    templateAssetPath: 'assets/templates/template_fish.png',
   ),
   TemplateSpec(
     key: 'pencil',
     title: 'ดินสอ',
-    templateAssetPath: 'assets/templates/templates_pencil.png',
+    templateAssetPath: 'assets/templates/template_pencil.png',
   ),
   TemplateSpec(
     key: 'icecream',
     title: 'ไอศกรีม',
-    templateAssetPath: 'assets/templates/templates_icecream.png',
+    templateAssetPath: 'assets/templates/template_icecream.png',
   ),
 ];
 
@@ -44,12 +43,14 @@ class TemplatePickerScreen extends StatefulWidget {
 class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
   String? _selectedKey;
 
-  void _onSelect(String key) {
-    setState(() => _selectedKey = key);
-  }
+  void _onSelect(String key) => setState(() => _selectedKey = key);
 
   @override
   Widget build(BuildContext context) {
+    // ✅ ดึง profile (มี age) จากหน้าโปรไฟล์
+    final args = ModalRoute.of(context)?.settings.arguments as Map?;
+    final profile = args?['profile']; // {id, name, age, ...}
+
     final selected = kTemplates.firstWhere(
       (t) => t.key == _selectedKey,
       orElse: () =>
@@ -57,7 +58,21 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
     );
 
     return Scaffold(
-      appBar: AppBar(title: const Text('เลือกเทมเพลต')),
+      appBar: AppBar(
+        title: const Text('เลือกเทมเพลต'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.menu),
+            tooltip: 'ดูประวัติการประเมิน',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const HistoryListScreen()),
+              );
+            },
+          ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(12),
         child: GridView.builder(
@@ -90,17 +105,15 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     const Spacer(),
-                    Icon(
-                      Icons.image_outlined,
-                      size: 48,
-                      color: Colors.grey.shade600,
-                    ),
+                    Icon(Icons.image_outlined,
+                        size: 48, color: Colors.grey.shade600),
                     const SizedBox(height: 12),
                     Text(
                       t.title,
                       style: TextStyle(
                         fontSize: 16,
-                        fontWeight: isSel ? FontWeight.w700 : FontWeight.w500,
+                        fontWeight:
+                            isSel ? FontWeight.w700 : FontWeight.w500,
                       ),
                     ),
                     const Spacer(),
@@ -134,24 +147,25 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
           onPressed: (_selectedKey ?? '').isEmpty
               ? null
               : () {
-                  final key = _selectedKey!; // fish / pencil / icecream
+                  final key = _selectedKey!; // 'fish' | 'pencil' | 'icecream'
                   final maskPath = 'assets/masks/${key}_mask.png';
 
                   Navigator.push(
                     context,
                     MaterialPageRoute(
                       builder: (_) => ProcessingScreen(
-                        // ProcessingScreen จะเปิด picker ให้เลือก/ถ่ายรูปอัตโนมัติถ้าไม่ส่ง imageBytes
                         maskAssetPath: maskPath,
-                        showInlineResult: true,
-                        templateAssetPath: '',
+                        templateName: selected.title,
                       ),
+                      settings: RouteSettings(arguments: {
+                        'profile': profile,
+                        'template': key,
+                      }),
                     ),
                   );
                 },
-          style: ElevatedButton.styleFrom(
-            minimumSize: const Size.fromHeight(48),
-          ),
+          style:
+              ElevatedButton.styleFrom(minimumSize: const Size.fromHeight(48)),
           child: const Text('ไปเลือก/ถ่ายรูป'),
         ),
       ),

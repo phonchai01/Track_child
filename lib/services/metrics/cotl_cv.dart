@@ -1,153 +1,320 @@
 // lib/services/metrics/cotl_cv.dart
+//
+// COTL (Color Outside The Line) : ค่าการระบาย “นอกเส้น”
+// แนวคิด:
+// 1) รับ mask_out (ขาว=นอก, ดำ=ใน) แล้วทำให้ชิดเส้นเล็กน้อย (tighten)
+// 2) สร้าง “วงแหวนตรวจ” รอบเส้นด้านนอก 2 ชั้น: ringAll และ ringInnerBias
+// 3) หา pixel ที่เป็น “สี/ลายเส้น” โดยมองทุกเฉดสี + กราไฟท์/ดำ
+//    และอิงกระดาษจริง (paper-aware) เพื่อตัดกระดาษออกให้เกลี้ยง
+// 4) นับสัดส่วนสีที่ตกในวงแหวน แล้ว bias น้ำหนักชั้นในมากกว่าชั้นนอก
+//
+// หมายเหตุ: โค้ดนี้ไม่พึ่งสีเฉพาะ—ครอบคลุมทุกเฉด (อิ่ม/ซีด/กราไฟท์)
+// และกันเส้นเทมเพลต (outline) ออกให้
+
+import 'dart:math' as math;
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
-/// ---------- Tunables (ค่านี้พอเหมาะกับสแกนกระดาษทั่วไป) ----------
-const int _S_COLORED_MIN = 35; // S >= 25 ถือว่ามีสี
-const int _V_BRIGHT_MIN = 80; // Gray >= 70 ถือว่าสว่าง
-const int _V_DARK_MAX = 80; // Gray <= 95 ถือว่ามืด (ดินสอ/ปากกา)
-const int _S_NEARWHITE = 15; // S ใกล้ขาว
-const int _V_NEARWHITE = 240; // Gray ใกล้ขาว
+/// ================= Tunables (ปรับเบา ๆ ได้) =================
 
-cv.Mat _rectK(int k) => cv.getStructuringElement(0 /*RECT*/, (k, k));
-cv.Mat _ellipK(int k) => cv.getStructuringElement(2 /*ELLIPSE*/, (k, k));
+/// สี/ความสว่างพื้นฐาน
+const int _S_COLORED_MIN = 26; // S >= 26 ≈ มีสีจริง
+const int _V_BRIGHT_MIN = 80; // V >= 80  ≈ สว่างพอ (พาสเทล/สีซีด)
 
-/// ทำให้แน่ใจว่า 255 = "ภายในเส้น"
-cv.Mat _ensureInsideIsWhite(cv.Mat inLineMask) {
-  cv.Mat m = inLineMask;
+/// ใกล้ขาว (ไว้ตัดกระดาษ): เราจะคำนวณแบบ dynamic จากกระดาษจริง แต่ตั้ง min/max ไว้
+const int _NEARWHITE_MIN = 235;
+const int _NEARWHITE_MAX = 252;
+
+/// แหวนด้านนอก (อิงสัดส่วนจากด้านสั้นของภาพ)
+const double _RING_OFFSET_FRAC = 0.0025; // ระยะถอยจากเส้น
+const double _RING_THICK_FRAC = 0.0075; // ความหนาวงแหวน
+const int _RING_OFFSET_MIN = 1, _RING_OFFSET_MAX = 8;
+const int _RING_THICK_MIN = 1, _RING_THICK_MAX = 12;
+
+/// ให้ความสำคัญกับชั้นในของแหวนมากกว่า (บริเวณที่ “หลุดเส้น” จริง)
+const double _INNER_PORTION = 0.75; // สัดส่วนความหนาที่เป็น inner band
+const double _INNER_WEIGHT = 0.90; // น้ำหนักตอนผสม rInner vs rAll
+
+/// เกณฑ์ snap เป็น 1.0 (กันกรณีวงแหวนถูกทาท่วม)
+const double _SNAP_RALL = 0.94;
+const double _SNAP_RINNER = 0.96;
+const double _SNAP_POST_BLEND = 0.965;
+
+/// ===================== Helpers =====================
+
+cv.Mat _rectK(int k) => cv.getStructuringElement(cv.MORPH_RECT, (k, k));
+cv.Mat _ellipK(int k) => cv.getStructuringElement(cv.MORPH_ELLIPSE, (k, k));
+
+cv.Mat _bin(cv.Mat m) {
   if (m.channels > 1) m = cv.cvtColor(m, cv.COLOR_BGR2GRAY);
-  m = cv.threshold(m, 127.0, 255.0, 0 /*BINARY*/).$2;
+  return cv.threshold(m, 127.0, 255.0, cv.THRESH_BINARY).$2;
+}
 
-  final total = (m.rows * m.cols).toDouble();
-  final ratioWhite = cv.countNonZero(m) / total;
-  // ถ้าดูเหมือนกลับขั้ว ให้กลับ
-  if (ratioWhite < 0.35 || ratioWhite > 0.90) {
-    m = cv.bitwiseNOT(m);
-    print('🔄 flip inside-mask: insideWhiteRatio(before)=$ratioWhite');
+/// รับ **mask_out** (ขาว=นอก, ดำ=ใน) — เช็ค 4 มุมแล้วกลับขั้วถ้าจำเป็น
+cv.Mat _ensureMaskOut(cv.Mat maskOutMaybe) {
+  cv.Mat m = _bin(maskOutMaybe);
+  final int h = m.rows, w = m.cols;
+  final int s = (math.min(h, w) * 0.1).round().clamp(8, 64);
+  final rois = <cv.Mat>[
+    m.rowRange(0, s).colRange(0, s),
+    m.rowRange(0, s).colRange(w - s, w),
+    m.rowRange(h - s, h).colRange(0, s),
+    m.rowRange(h - s, h).colRange(w - s, w),
+  ];
+  int white = 0, total = 0;
+  for (final r in rois) {
+    white += cv.countNonZero(r);
+    total += r.rows * r.cols;
   }
+  if ((white / total) < 0.5) m = cv.bitwiseNOT(m); // คว่ำให้เป็น mask_out
   return m;
 }
 
-/// สร้าง "แหวนรอบนอก" แบบบาง ด้วย morphological gradient + clamp ความหนา
-cv.Mat _buildOuterBand(cv.Mat inside) {
-  final int minSide = inside.rows < inside.cols ? inside.rows : inside.cols;
+/// ดันขอบ mask_out ให้ชิดเส้นในเล็กน้อย (ลดการไปทับเส้น)
+cv.Mat _tightenMaskOut(cv.Mat maskOut) {
+  final cv.Mat inside = cv.bitwiseNOT(maskOut); // ขาว=ใน
+  final cv.Mat expandedInside = cv.dilate(inside, _ellipK(2));
+  return cv.bitwiseNOT(expandedInside); // กลับเป็น mask_out
+}
 
-  // กำหนดความหนาเป้าหมาย ~ 0.6% ของด้านสั้น (กันบาง/หนาเกิน)
-  final int target = (minSide * 0.004).round().clamp(2, 8);
-  // gradient = dilate - erode → แหวนบางที่ขอบนอก-ใน
-  final cv.Mat grad = cv.morphologyEx(inside, 3 /*MORPH_GRADIENT*/, _ellipK(3));
-  // ขยาย/หดเพื่อให้ได้ความหนาใกล้ target
-  cv.Mat band = grad;
-  if (target > 3) {
-    band = cv.dilate(band, _ellipK(target - 1));
+/// ---------- สร้างวงแหวนรอบเส้นด้านนอก ----------
+class _RingBands {
+  final cv.Mat ringAll; // วงแหวนเต็มความหนา
+  final cv.Mat ringInnerBias; // เฉพาะชั้นใน (ชิดเส้น)
+  _RingBands(this.ringAll, this.ringInnerBias);
+}
+
+_RingBands _outerRingsFromMaskOut(
+  cv.Mat maskOut, {
+  int? offsetPx,
+  int? thickPx,
+}) {
+  final int minSide = math.min(maskOut.rows, maskOut.cols);
+
+  final int baseOff = (minSide * _RING_OFFSET_FRAC).round().clamp(
+    _RING_OFFSET_MIN,
+    _RING_OFFSET_MAX,
+  );
+  final int baseThk = (minSide * _RING_THICK_FRAC).round().clamp(
+    _RING_THICK_MIN,
+    _RING_THICK_MAX,
+  );
+
+  final int off = offsetPx ?? baseOff;
+  final int thk = thickPx ?? baseThk;
+  final int thkInner = math.max(
+    _RING_THICK_MIN,
+    (thk * _INNER_PORTION).round(),
+  );
+
+  // mask_out ขาว=นอก → ใช้ ERODE ยุบ “นอก” ถอยเข้าไปจากเส้น
+  final cv.Mat erOff = cv.erode(maskOut, _ellipK(off));
+  final cv.Mat erOffThk = cv.erode(maskOut, _ellipK(off + thk));
+  final cv.Mat erOffThin = cv.erode(maskOut, _ellipK(off + thkInner));
+
+  // ringAll = erOff AND NOT(erOffThk)
+  final cv.Mat not2 = cv.bitwiseNOT(erOffThk);
+  final cv.Mat ringAll = cv.Mat.zeros(maskOut.rows, maskOut.cols, maskOut.type);
+  erOff.copyTo(ringAll, mask: not2);
+
+  // ringInnerBias = erOff AND NOT(erOffThin)
+  final cv.Mat notThin = cv.bitwiseNOT(erOffThin);
+  final cv.Mat ringInner = cv.Mat.zeros(
+    maskOut.rows,
+    maskOut.cols,
+    maskOut.type,
+  );
+  erOff.copyTo(ringInner, mask: notThin);
+
+  // กันเส้นหนา/เอียง โดยไม่ให้นับทับ outline ด้านใน
+  final cv.Mat outline = cv.morphologyEx(
+    cv.bitwiseNOT(maskOut),
+    cv.MORPH_GRADIENT,
+    _ellipK(2),
+  );
+  final cv.Mat outlineFat = cv.dilate(outline, _rectK(1));
+
+  final cv.Mat safeAll = cv.Mat.zeros(ringAll.rows, ringAll.cols, ringAll.type);
+  final cv.Mat safeInner = cv.Mat.zeros(
+    ringInner.rows,
+    ringInner.cols,
+    ringInner.type,
+  );
+  ringAll.copyTo(safeAll, mask: cv.bitwiseNOT(outlineFat));
+  ringInner.copyTo(safeInner, mask: cv.bitwiseNOT(outlineFat));
+
+  // เปิดรูเล็ก ๆ
+  return _RingBands(
+    cv.morphologyEx(safeAll, cv.MORPH_OPEN, _rectK(3)),
+    cv.morphologyEx(safeInner, cv.MORPH_OPEN, _rectK(3)),
+  );
+}
+
+/// ---------- Quantile ของ V (0..255) ภายใน mask ----------
+int _quantileInMask(cv.Mat gray8, cv.Mat maskBin, double q) {
+  int lo = 0, hi = 255, ans = 255;
+  final int area = cv.countNonZero(maskBin);
+  if (area <= 0) return 255;
+  while (lo <= hi) {
+    final int mid = (lo + hi) >> 1;
+    final cv.Mat inv = cv
+        .threshold(gray8, mid.toDouble(), 255.0, cv.THRESH_BINARY_INV)
+        .$2;
+    final cv.Mat masked = cv.Mat.zeros(gray8.rows, gray8.cols, gray8.type);
+    inv.copyTo(masked, mask: maskBin);
+    final int cnt = cv.countNonZero(masked); // จำนวน <= mid
+    if (cnt >= (area * q).round()) {
+      ans = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
   }
-
-  // ไม่ให้อยู่ทับในเส้น: band = band & !inside
-  final cv.Mat notInside = cv.bitwiseNOT(inside);
-  final cv.Mat out = cv.Mat.zeros(band.rows, band.cols, band.type);
-  band.copyTo(out, mask: notInside);
-
-  // ทำความสะอาดนิดหน่อย
-  return cv.morphologyEx(out, 1 /*OPEN*/, _rectK(3));
+  return ans;
 }
 
-/// รวมด้วย mask (and)
-cv.Mat _maskAnd(cv.Mat a, cv.Mat b) {
-  final out = cv.Mat.zeros(a.rows, a.cols, a.type);
-  a.copyTo(out, mask: b);
-  return out;
+/// ใช้พื้นที่นอกเส้นแต่อยู่ไกลจากเส้น/ขอบพอสมควร เพื่ออ้างอิง “หน้ากระดาษจริง”
+cv.Mat _paperRefMask(cv.Mat maskOut) {
+  cv.Mat bg = cv.erode(maskOut, _ellipK(9));
+  bg = cv.erode(bg, _ellipK(5));
+  return bg;
 }
 
-/// รวมแบบ binary OR
-cv.Mat _maskOr(cv.Mat a, cv.Mat b) {
-  final add = cv.add(a, b);
-  return cv.threshold(add, 1.0, 255.0, 0 /*BINARY*/).$2;
-}
+/// ---------- มาสก์ “สี” ที่นับว่าเป็นการระบาย (paper-aware ครอบคลุมทุกเฉด) ----------
+cv.Mat _coloredMask(cv.Mat gray, cv.Mat sat, cv.Mat maskOut) {
+  // 1) อ้างอิงกระดาษจริง
+  final cv.Mat paperMask = _paperRefMask(maskOut);
+  final int paperQ80 = _quantileInMask(
+    gray,
+    paperMask,
+    0.80,
+  ); // Q80 ของ V นอกเส้น
+  final int dynNearWhite = math.min(
+    _NEARWHITE_MAX,
+    math.max(_NEARWHITE_MIN, paperQ80 + 6),
+  );
+  final int dynDarkThr = math.max(40, math.min(200, paperQ80 - 70));
 
-/// นิยาม "พิกเซลมีสี" (ผสม S สูง + สว่าง) OR (มืดมาก) แล้วตัดกระดาษขาว
-cv.Mat _coloredMask(cv.Mat grayMed, cv.Mat sat) {
-  final cv.Mat sGt = cv.threshold(sat, _S_COLORED_MIN.toDouble(), 255.0, 0).$2;
+  // 2) สีอิ่ม + สว่างพอ (สำหรับสีเทียน/ปากกา/พาสเทลอ่อน)
+  final cv.Mat sGt = cv
+      .threshold(sat, _S_COLORED_MIN.toDouble(), 255.0, cv.THRESH_BINARY)
+      .$2;
   final cv.Mat vBright = cv
-      .threshold(grayMed, _V_BRIGHT_MIN.toDouble(), 255.0, 0)
+      .threshold(gray, _V_BRIGHT_MIN.toDouble(), 255.0, cv.THRESH_BINARY)
       .$2;
-  final cv.Mat bySat = _maskAnd(sGt, vBright);
-
-  final cv.Mat vDark = cv
-      .threshold(grayMed, _V_DARK_MAX.toDouble(), 255.0, 1 /*INV*/)
+  final cv.Mat bySat = cv
+      .threshold(cv.add(sGt, vBright), 1.0, 255.0, cv.THRESH_BINARY)
       .$2;
-  final cv.Mat coloredPre = _maskOr(bySat, vDark);
 
+  // 3) ดำ/กราไฟท์/หมึก (ไม่ต้องพึ่ง S)
+  final cv.Mat vDarkDyn = cv
+      .threshold(gray, dynDarkThr.toDouble(), 255.0, cv.THRESH_BINARY_INV)
+      .$2;
+
+  // รวม “สีอิ่ม” OR “ดำกราไฟท์”
+  final cv.Mat coloredPre = cv
+      .threshold(cv.add(bySat, vDarkDyn), 1.0, 255.0, cv.THRESH_BINARY)
+      .$2;
+
+  // 4) ตัดกระดาษ (ใกล้ขาว) ออกให้หมด
   final cv.Mat sNearW = cv
-      .threshold(sat, _S_NEARWHITE.toDouble(), 255.0, 1 /*INV*/)
-      .$2;
+      .threshold(sat, 15.0, 255.0, cv.THRESH_BINARY_INV)
+      .$2; // S ต่ำมาก
   final cv.Mat vNearW = cv
-      .threshold(grayMed, _V_NEARWHITE.toDouble(), 255.0, 0 /*BIN*/)
+      .threshold(gray, dynNearWhite.toDouble(), 255.0, cv.THRESH_BINARY)
       .$2;
-  final cv.Mat nearWhite = _maskAnd(sNearW, vNearW);
-  return _maskAnd(coloredPre, cv.bitwiseNOT(nearWhite));
+  final cv.Mat nearW = cv
+      .threshold(cv.add(sNearW, vNearW), 1.0, 255.0, cv.THRESH_BINARY)
+      .$2;
+
+  // 5) กันเส้นเทมเพลตด้านในไม่ให้ถูกนับ
+  final cv.Mat inside = cv.bitwiseNOT(maskOut); // ขาว=ใน
+  final cv.Mat outline = cv.morphologyEx(inside, cv.MORPH_GRADIENT, _ellipK(2));
+  final cv.Mat outlineFat = cv.dilate(outline, _rectK(1));
+  final cv.Mat noOutline = cv
+      .threshold(outlineFat, 0.0, 255.0, cv.THRESH_BINARY_INV)
+      .$2;
+
+  // 6) รวมเงื่อนไข + เปิด/ปิดรูให้เนียน
+  final cv.Mat tmp = cv.Mat.zeros(gray.rows, gray.cols, gray.type);
+  coloredPre.copyTo(tmp, mask: noOutline);
+
+  final cv.Mat colored = cv.Mat.zeros(gray.rows, gray.cols, gray.type);
+  tmp.copyTo(colored, mask: cv.bitwiseNOT(nearW));
+
+  final cv.Mat opened = cv.morphologyEx(colored, cv.MORPH_OPEN, _rectK(3));
+  final cv.Mat closed = cv.morphologyEx(opened, cv.MORPH_CLOSE, _rectK(3));
+  return closed;
 }
 
-/// COTL = สัดส่วนพิกเซล "มีสี" ในแหวน *นอกเส้น* (0..1)
-Future<double> computeCotl(cv.Mat gray, cv.Mat sat, cv.Mat inLineMask) async {
-  // 0) เตรียมพื้นฐาน
+/// ===================================================================
+/// Public API
+Future<double> computeCotl(cv.Mat gray, cv.Mat sat, cv.Mat maskOut) async {
+  // เตรียมข้อมูล (ลดนอยส์เล็กน้อย)
+  final cv.Mat mOut = _tightenMaskOut(_ensureMaskOut(maskOut));
   final cv.Mat grayMed = cv.medianBlur(gray, 3);
-  final cv.Mat inside = _ensureInsideIsWhite(inLineMask);
 
-  // 1) แหวนรอบนอกแบบบาง
-  cv.Mat band = _buildOuterBand(inside);
-  int bandArea = cv.countNonZero(band);
-  final int total = band.rows * band.cols;
+  // วงแหวนรอบเส้นด้านนอก (2 ชั้น)
+  _RingBands rings = _outerRingsFromMaskOut(mOut);
+  int areaAll = cv.countNonZero(rings.ringAll);
+  int areaInner = cv.countNonZero(rings.ringInnerBias);
 
-  // ถ้าแหวนใหญ่เกิน (>= 30% ของภาพ) หรือเล็กไป (< 300 px) → ปรับ
-  final double bandRatio = bandArea / total;
-  if (bandArea < 300 || bandRatio > 0.30) {
-    final cv.Mat er = cv.erode(inside, _ellipK(5));
-    final cv.Mat grad = cv.morphologyEx(er, 3 /*GRADIENT*/, _ellipK(3));
-    band = _maskAnd(grad, cv.bitwiseNOT(inside));
-    band = cv.morphologyEx(band, 1 /*OPEN*/, _rectK(3));
-    bandArea = cv.countNonZero(band);
+  // Fallback: ถ้าบาง/เล็กเกิน ลองขยาย 20%
+  if (areaAll < 150 || areaInner < 80) {
+    final int minSide = math.min(mOut.rows, mOut.cols);
+    final int off2 = (minSide * (_RING_OFFSET_FRAC * 1.20)).round().clamp(
+      _RING_OFFSET_MIN,
+      _RING_OFFSET_MAX,
+    );
+    final int th2 = (minSide * (_RING_THICK_FRAC * 1.20)).round().clamp(
+      _RING_THICK_MIN,
+      _RING_THICK_MAX,
+    );
+    rings = _outerRingsFromMaskOut(mOut, offsetPx: off2, thickPx: th2);
+    areaAll = cv.countNonZero(rings.ringAll);
+    areaInner = cv.countNonZero(rings.ringInnerBias);
   }
-  if (bandArea <= 0) {
-    print('⚠️ COTL: bandArea=0');
+  if (areaAll <= 0) {
+    print('⚠️ [COTL] ring area = 0');
     return 0.0;
   }
 
-  // 2) พิกเซลมีสี และลบ “เส้นขอบ”
-  final cv.Mat colored = _coloredMask(grayMed, sat);
-  final cv.Mat edges = cv.canny(grayMed, 60, 120);
-  final cv.Mat edgesDil = cv.dilate(edges, _rectK(5));
-  final cv.Mat edgesInv = cv.threshold(edgesDil, 0.0, 255.0, 1 /*INV*/).$2;
+  // “สีที่นับว่าเป็นการระบาย” (ครอบคลุมทุกเฉด + ตัดกระดาษ/เส้น)
+  final cv.Mat colored = _coloredMask(grayMed, sat, mOut);
 
-  cv.Mat coloredNoEdge = _maskAnd(colored, edgesInv);
-  cv.Mat coloredNear = _maskAnd(coloredNoEdge, band);
-  coloredNear = cv.morphologyEx(coloredNear, 1 /*OPEN*/, _rectK(3));
+  // นับบนวงแหวน
+  cv.Mat colAll = cv.Mat.zeros(colored.rows, colored.cols, colored.type);
+  cv.Mat colInner = cv.Mat.zeros(colored.rows, colored.cols, colored.type);
+  colored.copyTo(colAll, mask: rings.ringAll);
+  colored.copyTo(colInner, mask: rings.ringInnerBias);
 
-  int coloredNearCount = cv.countNonZero(coloredNear);
-  double ratio = coloredNearCount / bandArea;
+  colAll = cv.morphologyEx(colAll, cv.MORPH_OPEN, _rectK(3));
+  colInner = cv.morphologyEx(colInner, cv.MORPH_OPEN, _rectK(3));
 
-  // 🔧 Fallback อัตโนมัติ: ถ้าได้ 1.0 ให้ "หดแหวน" + "เข้มเกณฑ์"
-  if (ratio >= 0.999) {
-    final cv.Mat erInside = cv.erode(inside, _ellipK(7));
-    final cv.Mat grad2 = cv.morphologyEx(erInside, 3 /*GRADIENT*/, _ellipK(3));
-    band = _maskAnd(grad2, cv.bitwiseNOT(erInside));
-    band = cv.morphologyEx(band, 1 /*OPEN*/, _rectK(3));
-    bandArea = cv.countNonZero(band);
+  final int hitAll = cv.countNonZero(colAll);
+  final int hitInner = cv.countNonZero(colInner);
+  final double rAll = (hitAll / areaAll).clamp(0.0, 1.0);
+  final double rInner = (hitInner / math.max(1, areaInner)).clamp(0.0, 1.0);
 
-    // เข้มเกณฑ์สีขึ้นเล็กน้อย: ใช้ vDark อย่างเดียวเป็นหลัก
-    final cv.Mat vDark = cv
-        .threshold(grayMed, (_V_DARK_MAX - 10).toDouble(), 255.0, 1)
-        .$2;
-    coloredNear = _maskAnd(vDark, band);
-    coloredNear = cv.morphologyEx(coloredNear, 1, _rectK(3));
-
-    coloredNearCount = cv.countNonZero(coloredNear);
-    ratio = (bandArea <= 0) ? 0.0 : (coloredNearCount / bandArea);
+  // snap → 1.0 หากท่วมมากเป็นพิเศษ
+  if (rAll >= _SNAP_RALL || rInner >= _SNAP_RINNER) {
+    print(
+      '[COTL] snap→1.0 (pre-blend) rAll=${rAll.toStringAsFixed(3)} rInner=${rInner.toStringAsFixed(3)}',
+    );
+    return 1.0;
   }
 
-  // debug log
-  final insideRatio = cv.countNonZero(inside) / total;
+  // รวมแบบให้น้ำหนักชั้นในมากกว่า
+  double ratio = (_INNER_WEIGHT * rInner) + ((1.0 - _INNER_WEIGHT) * rAll);
+
+  // การ์ดสุดท้าย
+  if (ratio >= _SNAP_POST_BLEND) {
+    print('[COTL] snap→1.0 (post-blend) ratio=${ratio.toStringAsFixed(3)}');
+    return 1.0;
+  }
+
+  // Debug
   print(
-    '[COTL] insideRatio=$insideRatio bandArea=$bandArea bandRatio=$bandRatio '
-    'colored=$coloredNearCount ratio=$ratio',
+    '[COTL] areaAll=$areaAll areaInner=$areaInner rAll=${rAll.toStringAsFixed(3)} rInner=${rInner.toStringAsFixed(3)} ratio=${ratio.toStringAsFixed(3)}',
   );
 
   return ratio.clamp(0.0, 1.0);

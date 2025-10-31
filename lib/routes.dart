@@ -38,7 +38,7 @@ class AppRouter {
       case AppRoutes.processing:
         return MaterialPageRoute(
           builder: (_) =>
-              const ProcessingScreen(maskAssetPath: '', templateAssetPath: ''),
+              const ProcessingScreen(maskAssetPath: ''),
           settings: settings, // ✅ ส่ง args ต่อให้หน้าประมวลผลด้วย
         );
 

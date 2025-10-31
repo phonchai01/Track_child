@@ -8,20 +8,23 @@ import './processing_screen.dart';
 class PickImageScreen extends StatelessWidget {
   const PickImageScreen({
     super.key,
-    required this.maskAssetPath, // <- ใช้ mask สำเร็จรูป
-    this.templateName, // ไว้โชว์ชื่อ/ดีบั๊ก
+    required this.maskAssetPath, // เช่น 'assets/masks/fish_mask.png'
+    this.templateName,           // ชื่อเทมเพลตเพื่อโชว์บน AppBar
   });
 
-  final String maskAssetPath; // เช่น 'assets/masks/fish_mask.png'
+  final String maskAssetPath;
   final String? templateName;
 
   Future<void> _pick(BuildContext context, ImageSource source) async {
-    // กันพลาด: ถ้า mask ว่าง ให้ฟ้องก่อน
+    // ดึง args ที่ส่งมาจาก TemplatePicker (profile + template)
+    final args = ModalRoute.of(context)?.settings.arguments as Map?;
+    final profile = args?['profile'];
+    final template =
+        (args?['template'] ?? templateName)?.toString(); // กันกรณีไม่ได้ส่ง template ใน args
+
     if (maskAssetPath.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('maskAssetPath ว่าง: กรุณาส่งพาธของ mask'),
-        ),
+        const SnackBar(content: Text('maskAssetPath ว่าง: กรุณาส่งพาธของ mask')),
       );
       return;
     }
@@ -31,16 +34,19 @@ class PickImageScreen extends StatelessWidget {
 
     final Uint8List bytes = await picked.readAsBytes();
 
-    // ไปหน้า Processing พร้อม bytes (รูปจริง) + maskAssetPath (mask ภายในเส้น)
+    // ไปหน้า Processing พร้อมรูป + mask และ "ส่งต่อ" profile/age + template ไปด้วย
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => ProcessingScreen(
           imageBytes: bytes,
-          maskAssetPath: maskAssetPath, // ✅ ใช้ mask
-          showInlineResult: true,
-          templateAssetPath: '',
+          maskAssetPath: maskAssetPath,
+          templateName: template, // เผื่อใช้แสดงชื่อบนหน้า Processing
         ),
+        settings: RouteSettings(arguments: {
+          'profile': profile,     // ✅ สำคัญ: มี age อยู่ในนี้
+          'template': template,   // ✅ สำคัญ: Fish/Pencil/IceCream
+        }),
       ),
     );
   }
@@ -48,6 +54,7 @@ class PickImageScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+
     return Scaffold(
       appBar: AppBar(title: Text('เลือกรูป (${templateName ?? 'template'})')),
       body: Padding(
@@ -77,9 +84,7 @@ class PickImageScreen extends StatelessWidget {
             const Spacer(),
             Text(
               'Mask: $maskAssetPath',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: Colors.grey[600],
-              ),
+              style: theme.textTheme.bodySmall?.copyWith(color: Colors.grey[600]),
               textAlign: TextAlign.center,
             ),
           ],

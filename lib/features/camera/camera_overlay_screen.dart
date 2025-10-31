@@ -62,8 +62,6 @@ class CameraOverlayScreen extends StatelessWidget {
             imageBytes: bytes,
             maskAssetPath:
                 'assets/masks/${templateKey}_mask.png', // โหลด mask ตามชื่อ key
-            showInlineResult: true,
-            templateAssetPath: '',
           ),
 
           settings: RouteSettings(

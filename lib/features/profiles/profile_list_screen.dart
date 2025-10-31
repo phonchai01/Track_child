@@ -127,7 +127,9 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
       context,
       MaterialPageRoute(
         builder: (_) => const TemplatePickerScreen(),
-        settings: RouteSettings(arguments: item), // ส่งโปรไฟล์ไปด้วย
+        settings: RouteSettings(arguments: {
+          'profile': item,   // ✅ ใช้ item แทน it
+        }),
       ),
     );
   }
@@ -163,7 +165,7 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
                       leading: const CircleAvatar(child: Icon(Icons.person)),
                       title: Text(it['name'] as String),
                       subtitle: Text('อายุ: ${(it['age'] as int)} ขวบ'),
-                      onTap: () => _openTemplates(it),
+                      onTap: () => _openTemplates(it),       // ✅ แค่เรียกเมธอด
                       trailing: IconButton(
                         icon: const Icon(Icons.delete_outline),
                         onPressed: () => _confirmDelete(it),
@@ -173,6 +175,7 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
                   separatorBuilder: (_, __) => const SizedBox(height: 8),
                   itemCount: _items.length,
                 ),
+
     );
   }
 }
