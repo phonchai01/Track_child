@@ -1,32 +1,29 @@
-import 'dart:convert';
-
+// lib/data/models/history_record.dart
 class HistoryRecord {
-  final String id; // timestamp หรือ uuid
-  final DateTime createdAt;
-  final String templateKey; // fish / pencil / icecream
-  final int age; // อายุ (ปี) ถ้ามี
+  final String id; // ใช้ now.millisecondsSinceEpoch.toString()
+  final DateTime createdAt; // เวลาบันทึก
+  final String profileKey; // ✅ เพิ่มสำหรับแยกโปรไฟล์
+  final String templateKey; // 'Fish' | 'Pencil' | 'IceCream' (หรือไทย)
+  final int age;
+  final double h;
+  final double c;
+  final double blank;
+  final double cotl;
 
-  // raw metrics
-  final double h; // Entropy
-  final double c; // Complexity
-  final double blank; // ในเส้น
-  final double cotl; // นอกเส้น
-
-  // Z-scores
+  // Z ระบุไว้เพื่อแสดง/วิเคราะห์เพิ่มเติม
   final double zH;
   final double zC;
   final double zBlank;
   final double zCotl;
+  final double zSum;
 
-  // ✅ ฟิลด์ใหม่
-  final double zSum; // ดัชนีรวม
-  final String level; // การแปลผล เช่น "ปกติ" / "ต่ำ" / "สูง"
-
-  final String imagePath; // path รูปที่บันทึก (สำหรับแสดงภายหลัง)
+  final String level; // 'ต่ำกว่ามาตรฐาน' | ...
+  final String? imagePath; // path รูป preview (optional)
 
   HistoryRecord({
     required this.id,
     required this.createdAt,
+    required this.profileKey,
     required this.templateKey,
     required this.age,
     required this.h,
@@ -39,48 +36,48 @@ class HistoryRecord {
     required this.zCotl,
     required this.zSum,
     required this.level,
-    required this.imagePath,
+    this.imagePath,
   });
 
+  /// ✅ แปลงเป็น Map สำหรับบันทึก JSON/SQLite
   Map<String, dynamic> toMap() => {
-        'id': id,
-        'createdAt': createdAt.toIso8601String(),
-        'templateKey': templateKey,
-        'age': age,
-        'h': h,
-        'c': c,
-        'blank': blank,
-        'cotl': cotl,
-        'zH': zH,
-        'zC': zC,
-        'zBlank': zBlank,
-        'zCotl': zCotl,
-        'zSum': zSum, // ✅
-        'level': level, // ✅
-        'imagePath': imagePath,
-      };
+    'id': id,
+    'createdAt': createdAt.millisecondsSinceEpoch,
+    'profileKey': profileKey, // ✅ เพิ่ม
+    'templateKey': templateKey,
+    'age': age,
+    'h': h,
+    'c': c,
+    'blank': blank,
+    'cotl': cotl,
+    'zH': zH,
+    'zC': zC,
+    'zBlank': zBlank,
+    'zCotl': zCotl,
+    'zSum': zSum,
+    'level': level,
+    'imagePath': imagePath,
+  };
 
+  /// ✅ โหลดจาก Map (ไฟล์/DB)
   factory HistoryRecord.fromMap(Map<String, dynamic> m) => HistoryRecord(
-        id: m['id'] ?? '',
-        createdAt: DateTime.tryParse(m['createdAt'] ?? '') ?? DateTime.now(),
-        templateKey: m['templateKey'] ?? '',
-        age: (m['age'] ?? 0) is int
-            ? m['age']
-            : int.tryParse(m['age'].toString()) ?? 0,
-        h: (m['h'] ?? 0).toDouble(),
-        c: (m['c'] ?? 0).toDouble(),
-        blank: (m['blank'] ?? 0).toDouble(),
-        cotl: (m['cotl'] ?? 0).toDouble(),
-        zH: (m['zH'] ?? 0).toDouble(),
-        zC: (m['zC'] ?? 0).toDouble(),
-        zBlank: (m['zBlank'] ?? 0).toDouble(),
-        zCotl: (m['zCotl'] ?? 0).toDouble(),
-        zSum: (m['zSum'] ?? 0).toDouble(), // ✅
-        level: m['level'] ?? '-', // ✅
-        imagePath: m['imagePath'] ?? '',
-      );
-
-  String toJson() => jsonEncode(toMap());
-  factory HistoryRecord.fromJson(String s) =>
-      HistoryRecord.fromMap(jsonDecode(s));
+    id: m['id']?.toString() ?? '',
+    createdAt: DateTime.fromMillisecondsSinceEpoch(
+      (m['createdAt'] as num?)?.toInt() ?? 0,
+    ),
+    profileKey: m['profileKey']?.toString() ?? '', // ✅ ดึงกลับ
+    templateKey: m['templateKey']?.toString() ?? '',
+    age: (m['age'] as num?)?.toInt() ?? 0,
+    h: (m['h'] as num?)?.toDouble() ?? 0,
+    c: (m['c'] as num?)?.toDouble() ?? 0,
+    blank: (m['blank'] as num?)?.toDouble() ?? 0,
+    cotl: (m['cotl'] as num?)?.toDouble() ?? 0,
+    zH: (m['zH'] as num?)?.toDouble() ?? 0,
+    zC: (m['zC'] as num?)?.toDouble() ?? 0,
+    zBlank: (m['zBlank'] as num?)?.toDouble() ?? 0,
+    zCotl: (m['zCotl'] as num?)?.toDouble() ?? 0,
+    zSum: (m['zSum'] as num?)?.toDouble() ?? 0,
+    level: m['level']?.toString() ?? '-',
+    imagePath: m['imagePath']?.toString(),
+  );
 }

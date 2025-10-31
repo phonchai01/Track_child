@@ -15,6 +15,10 @@ import '../../services/metrics/cotl_cv.dart';
 import '../../services/metrics/entropy_cv.dart';
 import '../../services/metrics/complexity_cv.dart';
 
+// สำหรับบันทึกประวัติ
+import '../../data/models/history_record.dart';
+import '../../data/repositories/history_repo.dart';
+
 class ProcessingScreen extends StatefulWidget {
   const ProcessingScreen({
     super.key,
@@ -27,8 +31,8 @@ class ProcessingScreen extends StatefulWidget {
 
   final Uint8List? imageBytes;
   final String? imageAssetPath;
-  final String maskAssetPath;   // e.g. assets/masks/fish_mask.png
-  final String? templateName;   // label แสดงผล
+  final String maskAssetPath; // e.g. assets/masks/fish_mask.png
+  final String? templateName; // label แสดงผล
   final String? imageName;
 
   @override
@@ -53,7 +57,8 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 
   // profile/template
   late String _classKey; // 'Fish' | 'Pencil' | 'IceCream'
-  late int _age;         // 4 หรือ 5
+  late int _age; // 4 หรือ 5
+  String _profileKey = ''; // owner ของประวัติ
 
   bool _started = false;
   late Future<void> _svcWarmup;
@@ -61,10 +66,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   @override
   void initState() {
     super.initState();
-    // อุ่น service ให้พร้อมใช้ (อ่านไฟล์ assets/data/result_metrics.csv)
     _svcWarmup = ZScoreService.instance.ensureLoaded();
-
-    // เริ่มวิ่ง pipeline หลังเฟรมแรก
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_started) return;
       _started = true;
@@ -75,21 +77,28 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-
-    // ดึง args จากหน้าโปรไฟล์/เลือกเทมเพลต
     final args = ModalRoute.of(context)?.settings.arguments as Map?;
     final profile = (args?['profile'] as Map?)?.cast<String, dynamic>();
+
+    _profileKey =
+        (profile?['key'] ??
+                profile?['id'] ??
+                profile?['profileKey'] ??
+                profile?['name'] ?? // ถ้าใช้ชื่อเป็นคีย์
+                '')
+            .toString();
 
     final rawTemplate =
         (args?['template'] ?? args?['templateKey'] ?? widget.templateName ?? '')
             .toString();
-
     _classKey = _resolveClassKey(rawTemplate);
 
     final dynamic ageRaw = profile?['age'];
     _age = (ageRaw is int) ? ageRaw : int.tryParse('${ageRaw ?? '0'}') ?? 0;
 
-    debugPrint('>> args -> classKey=$_classKey age=$_age');
+    debugPrint(
+      '>> args -> classKey=$_classKey age=$_age profileKey=$_profileKey',
+    );
   }
 
   // ---------- Helpers ----------
@@ -114,11 +123,11 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   }
 
   String _templateLabelFromKey(String key) => switch (key) {
-        'Fish' => 'ปลา',
-        'Pencil' => 'ดินสอ',
-        'IceCream' => 'ไอศกรีม',
-        _ => key,
-      };
+    'Fish' => 'ปลา',
+    'Pencil' => 'ดินสอ',
+    'IceCream' => 'ไอศกรีม',
+    _ => key,
+  };
 
   Future<cv.Mat> _decodeBgr(Uint8List bytes) async =>
       cv.imdecode(bytes, cv.IMREAD_COLOR);
@@ -161,7 +170,10 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('เลือกแหล่งรูปภาพ', style: Theme.of(ctx).textTheme.titleMedium),
+            Text(
+              'เลือกแหล่งรูปภาพ',
+              style: Theme.of(ctx).textTheme.titleMedium,
+            ),
             const SizedBox(height: 10),
             ElevatedButton.icon(
               onPressed: () => Navigator.pop(ctx, ImageSource.gallery),
@@ -214,11 +226,10 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       // 2) โหลด mask ภายในเส้น + ภายนอกเส้น
       final maskInRaw = await _loadBinaryMask(widget.maskAssetPath);
       final insideRaw = ensureWhiteIsInside(maskInRaw);
-      final inside = cv.resize(
-        insideRaw,
-        (bgr.cols, bgr.rows),
-        interpolation: cv.INTER_NEAREST,
-      );
+      final inside = cv.resize(insideRaw, (
+        bgr.cols,
+        bgr.rows,
+      ), interpolation: cv.INTER_NEAREST);
       final insideSafe = shrinkInsideForSafeCount(inside, px: 1);
 
       final maskOutPath = widget.maskAssetPath
@@ -229,29 +240,39 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       try {
         final maskOutRaw = await _loadBinaryMask(maskOutPath);
         final insideFromOut = ensureWhiteIsInside(cv.bitwiseNOT(maskOutRaw));
-        final insideFromOutResized = cv.resize(
-          insideFromOut,
-          (bgr.cols, bgr.rows),
-          interpolation: cv.INTER_NEAREST,
+        final insideFromOutResized = cv.resize(insideFromOut, (
+          bgr.cols,
+          bgr.rows,
+        ), interpolation: cv.INTER_NEAREST);
+        insideForCotlSafe = shrinkInsideForSafeCount(
+          insideFromOutResized,
+          px: 1,
         );
-        insideForCotlSafe = shrinkInsideForSafeCount(insideFromOutResized, px: 1);
       } catch (_) {
         insideForCotlSafe = insideSafe;
       }
 
       // 3) channels
       final gray = cv.cvtColor(bgr, cv.COLOR_BGR2GRAY);
-      final sat  = _extractS(bgr);
+      final sat = _extractS(bgr);
 
       // 4) metrics (raw)
       final blank = await computeBlank(gray, sat, insideSafe);
-      final ent   = EntropyCV.computeNormalized(bgr, mask: insideSafe);
-      final comp  = ComplexityCV.edgeDensity(bgr, mask: insideSafe);
-      final cotl  = await computeCotl(gray, sat, insideForCotlSafe);
+      final ent = EntropyCV.computeNormalized(bgr, mask: insideSafe);
+      final comp = ComplexityCV.edgeDensity(bgr, mask: insideSafe);
+      final cotl = await computeCotl(gray, sat, insideForCotlSafe);
 
-      // 5) Index (raw) + ช่วงอ้างอิง [μ±σ]
+      // 5) คำนวณ Index (raw) + Z-sum
       await _svcWarmup;
-      final r = await ZScoreService.instance.computeRaw(
+      final raw = await ZScoreService.instance.computeRaw(
+        templateKey: _classKey,
+        age: _age,
+        h: ent,
+        c: comp,
+        blank: blank,
+        cotl: cotl,
+      );
+      final z = await ZScoreService.instance.compute(
         templateKey: _classKey,
         age: _age,
         h: ent,
@@ -260,22 +281,64 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         cotl: cotl,
       );
 
+      // 6) บันทึกประวัติ (PNG + record)
+      try {
+        // encode PNG ของภาพผลลัพธ์
+        final Uint8List pngBytes = Uint8List.fromList(
+          cv.imencode('.png', bgr).$2.toList(),
+        );
+
+        String imagePath = '';
+        if (_profileKey.isNotEmpty) {
+          imagePath = await HistoryRepo.I.saveImageBytes(
+            pngBytes,
+            profileKey: _profileKey,
+          );
+        }
+
+        final now = DateTime.now();
+        final rec = HistoryRecord(
+          id: now.millisecondsSinceEpoch.toString(),
+          createdAt: now,
+          profileKey: _profileKey,
+          templateKey: _classKey,
+          age: _age,
+          h: ent,
+          c: comp,
+          blank: blank,
+          cotl: cotl,
+          // ✅ z-values มาจาก compute() (ไม่ใช่ผล raw)
+          zH: z.zH,
+          zC: z.zC,
+          zBlank: z.zBlank,
+          zCotl: z.zCotl,
+          zSum: z.zSum,
+          // ✅ ระดับและไฟล์
+          level: raw.level,
+          imagePath: imagePath,
+        );
+
+        await HistoryRepo.I.add(_profileKey, rec);
+        debugPrint('✅ [HIS] saved ${rec.id} for profile=$_profileKey');
+      } catch (e) {
+        debugPrint('⚠️ [HIS] save failed: $e');
+      }
+
       if (!mounted) return;
       setState(() {
         _previewBytes = preview;
-
         _blank = blank;
         _cotl = cotl;
         _entropy = ent;
         _complexity = comp;
 
-        _indexRaw = r.index;
-        _level = r.level;
+        _indexRaw = raw.index;
+        _level = raw.level;
 
-        _lowCut = r.lowCut;
-        _highCut = r.highCut;
-        _mu = r.mu;
-        _sigma = r.sigma;
+        _lowCut = raw.lowCut;
+        _highCut = raw.highCut;
+        _mu = raw.mu;
+        _sigma = raw.sigma;
 
         _error = null;
       });
@@ -305,7 +368,8 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       );
     }
 
-    final waiting = _blank == null ||
+    final waiting =
+        _blank == null ||
         _cotl == null ||
         _entropy == null ||
         _complexity == null;
@@ -329,8 +393,10 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
             ),
             const SizedBox(height: 12),
           ],
-          Text('อายุ $_age ขวบ  |  เทมเพลต $templateLabel',
-              style: theme.textTheme.titleMedium),
+          Text(
+            'อายุ $_age ขวบ  |  เทมเพลต $templateLabel',
+            style: theme.textTheme.titleMedium,
+          ),
 
           const Divider(height: 28),
 
@@ -361,7 +427,8 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 
           const SizedBox(height: 32),
           ElevatedButton.icon(
-            onPressed: () => Navigator.popUntil(context, (r) => r.isFirst),
+            // ✅ ย้อนกลับแค่หนึ่งหน้า → TemplatePicker
+            onPressed: () => Navigator.pop(context),
             icon: const Icon(Icons.home_outlined),
             label: const Text('กลับไปหน้าเลือกเทมเพลต'),
             style: ElevatedButton.styleFrom(

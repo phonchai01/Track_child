@@ -3,7 +3,6 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
-import '../../widgets/app_drawer.dart';
 import '../../widgets/app_button.dart';
 import '../../widgets/template_overlay.dart';
 import '../processing/processing_screen.dart';
@@ -20,7 +19,7 @@ class CameraOverlayScreen extends StatelessWidget {
       'ไอศกรีม': 'icecream',
       'ไอติม': 'icecream',
     };
-    return mapThToKey[r] ?? r; // ถ้าเป็น 'fish'/'pencil' อยู่แล้วจะคงเดิม
+    return mapThToKey[r] ?? r;
   }
 
   /// อ่าน templateKey จาก arguments (รองรับทั้ง Map และ String)
@@ -60,15 +59,10 @@ class CameraOverlayScreen extends StatelessWidget {
         MaterialPageRoute(
           builder: (_) => ProcessingScreen(
             imageBytes: bytes,
-            maskAssetPath:
-                'assets/masks/${templateKey}_mask.png', // โหลด mask ตามชื่อ key
+            maskAssetPath: 'assets/masks/${templateKey}_mask.png',
           ),
-
           settings: RouteSettings(
-            arguments: {
-              'imageBytes': bytes,
-              'templateKey': templateKey, // Processing จะโหลด mask ตาม key นี้
-            },
+            arguments: {'imageBytes': bytes, 'templateKey': templateKey},
           ),
         ),
       );
@@ -84,15 +78,21 @@ class CameraOverlayScreen extends StatelessWidget {
     final String templateKey = _getTemplateKey(context);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('โหมดถ่ายภาพ')),
-      drawer: const AppDrawer(),
+      appBar: AppBar(
+        title: const Text('โหมดถ่ายภาพ'),
+        backgroundColor: Colors.deepPurple,
+      ),
       body: Stack(
         children: [
+          // พื้นหลังไอคอนกล้อง
           const Center(
             child: Icon(Icons.photo_camera, size: 120, color: Colors.black26),
           ),
-          // แสดง overlay ตามเทมเพลตที่เลือก (หลัง normalize แล้ว)
+
+          // แสดง overlay ของเทมเพลต (เช่น กรอบรูปปลา)
           TemplateOverlay(templateName: templateKey),
+
+          // ปุ่มล่างสองปุ่ม: เลือกรูป / ถ่ายรูป
           Positioned(
             left: 16,
             right: 16,

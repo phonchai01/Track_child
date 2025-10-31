@@ -153,7 +153,6 @@ _Measure _measurePainted(
   return _Measure(pr, painted);
 }
 
-// ปรับการคำนวณพื้นที่ที่ไม่มีการระบายสี
 Future<double> computeBlank(cv.Mat gray, cv.Mat sat, cv.Mat inLineMask) async {
   final gray8 = _to8U(gray);
   var sat8 = _to8U(sat);
@@ -161,28 +160,22 @@ Future<double> computeBlank(cv.Mat gray, cv.Mat sat, cv.Mat inLineMask) async {
   var g = gray8.clone();
   if (_kEqHist == 1) g = cv.equalizeHist(g);
   final grayMed = cv.medianBlur(g, 3);
-
   if (sat8.rows != gray8.rows || sat8.cols != gray8.cols) {
     sat8 = cv.resize(sat8, (
       gray8.cols,
       gray8.rows,
     ), interpolation: cv.INTER_NEAREST);
   }
-
   final satMed = cv.medianBlur(sat8, 3);
 
-  // สร้าง mask เพื่อแยกพื้นที่ที่ไม่ระบายสี
+  // เลือก keepInside
   final m0 = _bin(inLineMask);
   final m1 = cv.threshold(m0, 0.0, 255.0, cv.THRESH_BINARY_INV).$2;
-
-  // ปรับปรุงการคำนวณพื้นที่ว่าง
   final c0 = _prepKeep(m0, grayMed, _kEdgeBandPxDefault, invFlag: false);
   final c1 = _prepKeep(m1, grayMed, _kEdgeBandPxDefault, invFlag: true);
-
   final total = gray8.rows * gray8.cols;
   final bad0 = c0.area > total * 0.60 || c0.area < total * 0.05;
   final bad1 = c1.area > total * 0.60 || c1.area < total * 0.05;
-
   final cand = bad0 && !bad1
       ? c1
       : bad1 && !bad0
@@ -194,10 +187,9 @@ Future<double> computeBlank(cv.Mat gray, cv.Mat sat, cv.Mat inLineMask) async {
 
   final keep = cand.keep;
   final safeArea = cand.area;
-
   if (safeArea <= 0) return 1.0;
 
-  // ปรับค่าเฉลี่ยของพื้นที่ที่ไม่มีการระบายสี (Blank Area)
+  // สถิติพื้นฐาน
   final avgB = cand.avg;
   final qBright = (avgB < 140) ? 0.55 : 0.42;
   final tBright = _tailGEQuantile(grayMed, keep, qBright);
@@ -218,19 +210,23 @@ Future<double> computeBlank(cv.Mat gray, cv.Mat sat, cv.Mat inLineMask) async {
   }
 
   var P = _seedParams(avgB, tBright, tMin, tMax);
+  if (avgB < 100) {
+    P.vDark = (P.vDark + 25).clamp(110, 180);
+    P.pastel = (P.pastel + 6).clamp(10, 24);
+    P.grow = (P.grow - 1).clamp(3, 8);
+  }
 
-  // การปรับ Smin จาก s-tail
+  // ปรับ Smin จาก s-tail
   final sTail = _tailGEQuantile(satMed, keep, 0.20);
   P.sMin = (sTail * 0.80).clamp(24, 110).toInt();
 
   // วัดครั้งที่ 1
   _Measure meas = _measurePainted(grayMed, satMed, keep, P);
 
-  // อัปเดตค่าพารามิเตอร์ตามการตรวจวัด
+  // Auto-tune (เบาลง เพราะเราแก้ pastel แล้ว)
   const double lo = 0.65, hi = 0.85;
   for (int it = 0; it < 3; it++) {
     if (meas.paintedRatio >= lo && meas.paintedRatio <= hi) break;
-
     if (meas.paintedRatio > hi) {
       final over = (meas.paintedRatio - hi).clamp(0.0, 0.30);
       P.sMin = (P.sMin + (14 + 40 * over)).round().clamp(40, 130);
@@ -246,8 +242,11 @@ Future<double> computeBlank(cv.Mat gray, cv.Mat sat, cv.Mat inLineMask) async {
       P.grow = (P.grow + 1).clamp(2, 10);
       P.tPaper = (P.tPaper - (8 + 18 * under)).round().clamp(140, 230);
     }
-
     meas = _measurePainted(grayMed, satMed, keep, P);
+    print(
+      'Tune#$it painted=${(meas.paintedRatio * 100).toStringAsFixed(1)}% '
+      'Smin=${P.sMin} vDark=${P.vDark} pastel=${P.pastel} grow=${P.grow} Tpaper=${P.tPaper}',
+    );
   }
 
   // กระดาษจริง = ขาว & NOT(painted)
@@ -265,6 +264,9 @@ Future<double> computeBlank(cv.Mat gray, cv.Mat sat, cv.Mat inLineMask) async {
   final blankPainted = (1.0 - meas.paintedRatio).clamp(0.0, 1.0);
   final blank = (blankPaper < blankPainted ? blankPaper : blankPainted);
 
+  print(
+    'PaintedDbg: painted=${(meas.paintedRatio * 100).toStringAsFixed(1)}% safeArea=$safeArea',
+  );
   print(
     'BlankDbg[AUTO]: area=$safeArea paper=$paperCnt blank=${blank.toStringAsFixed(3)} '
     'avgB=${avgB.toStringAsFixed(1)} Tpaper=${P.tPaper} '

@@ -2,7 +2,13 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'routes.dart';
-import 'features/profiles/profile_list_screen.dart'; // <- ใช้เป็น home
+
+// ตั้งให้ path ตรงกับโปรเจกต์ของคุณ:
+// ถ้าโฟลเดอร์ชื่อ features/profiles/ ให้ใช้ import นี้
+import 'features/profiles/profile_list_screen.dart';
+
+// ถ้าโปรเจกต์คุณใช้ features/profile/ (ไม่มี s) ให้ใช้บรรทัดล่างแทน
+// import 'features/profile/profile_list_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,8 +24,6 @@ void main() {
       runApp(const ColoringApp());
     },
     (error, stack) {
-      // ดูสาเหตุจริงถ้ามีแอปเด้ง
-      // คุณจะเห็นบรรทัดนี้ในคอนโซล
       debugPrint('UNCAUGHT ERROR: $error\n$stack');
     },
   );
@@ -35,11 +39,11 @@ class ColoringApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.deepPurple),
 
-      // แสดงหน้าเลือกเทมเพลตเป็นหน้าแรก (ลดความเสี่ยงชื่อ route เพี้ยน)
+      // ✅ หน้าแรก: เลือกโปรไฟล์
       home: const ProfileListScreen(),
 
-      // ยังให้ onGenerateRoute ใช้งานได้ตามเดิมเวลานำทาง
-      onGenerateRoute: AppRouter.onGenerateRoute,
+      // ✅ ใช้ routes แบบตายตัวจาก routes.dart (ไม่ใช้ onGenerateRoute แล้ว)
+      routes: AppRoutes.routes,
     );
   }
 }

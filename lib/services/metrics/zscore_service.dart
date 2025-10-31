@@ -21,8 +21,8 @@ class _Stats {
 class IndexBand {
   final double mu;
   final double sigma;
-  final double low;   // mu - k*sigma
-  final double high;  // mu + k*sigma
+  final double low; // mu - k*sigma
+  final double high; // mu + k*sigma
   final double k;
   const IndexBand({
     required this.mu,
@@ -37,14 +37,32 @@ class IndexBand {
 /// ผลสำหรับ RAW INDEX
 /// -----------------------------
 class RawIndexResult {
-  final double index;    // -H + C - Blank - COTL (raw)
-  final String level;    // ต่ำกว่ามาตรฐาน | อยู่ในเกณฑ์มาตรฐาน | สูงกว่ามาตรฐาน
-  final double mu;       // μ ของ raw-index ในกลุ่ม
-  final double sigma;    // σ ของ raw-index ในกลุ่ม
-  final double lowCut;   // μ−σ
-  final double highCut;  // μ+σ
+  /// -H + C - Blank - COTL (raw)
+  final double index;
+
+  /// Z ของแต่ละ metric (อิง baseline ของกลุ่มเดียวกัน)
+  /// หมายเหตุ: เรากลับสัญญาณให้เข้าทางเดียวกับคะแนนรวมแล้ว
+  ///   zH = -Z(H), zC = +Z(C), zBlank = -Z(Blank), zCotl = -Z(COTL)
+  final double zH;
+  final double zC;
+  final double zBlank;
+  final double zCotl;
+
+  /// การแปลผลของ index (อิงช่วง [μ−σ, μ+σ] ของ raw-index)
+  final String level;
+
+  /// ค่าสถิติของ raw-index ของกลุ่ม
+  final double mu; // μ
+  final double sigma; // σ
+  final double lowCut; // μ−σ
+  final double highCut; // μ+σ
+
   const RawIndexResult({
     required this.index,
+    required this.zH,
+    required this.zC,
+    required this.zBlank,
+    required this.zCotl,
     required this.level,
     required this.mu,
     required this.sigma,
@@ -61,7 +79,7 @@ class ZScoreResult {
   final double zC;
   final double zBlank;
   final double zCotl;
-  final double zSum;     // ดัชนีรวมในสเกล Z
+  final double zSum; // ดัชนีรวมในสเกล Z
   final String level;
 
   final double? zsumMean;
@@ -88,7 +106,7 @@ class ZScoreResult {
 /// เก็บสถิติ metric ดิบ + สถิติของทั้ง Z-sum และ RAW index
 /// ----------------------------------------------
 class _MetricStatsBundle {
-  final _Stats h, c, blank, cotl;  // สถิติ metric ดิบ
+  final _Stats h, c, blank, cotl; // สถิติ metric ดิบ
   // baseline สำหรับ Z-sum
   final double zsumMean;
   final double zsumSd;
@@ -120,7 +138,9 @@ class ZScoreService {
 
   Future<void> ensureLoaded() async {
     if (_loaded) return;
-    final csvText = await rootBundle.loadString('assets/data/result_metrics.csv');
+    final csvText = await rootBundle.loadString(
+      'assets/data/result_metrics.csv',
+    );
     _buildStatsFromCsv(csvText);
     _loaded = true;
   }
@@ -139,35 +159,54 @@ class ZScoreService {
     await ensureLoaded();
 
     final tk = _normalizeTemplate(templateKey);
-    final a  = _closestAgeGroup(age);
-    final b  = _stats[tk]?[a];
+    final a = _closestAgeGroup(age);
+    final b = _stats[tk]?[a];
 
     if (b == null) {
       return const RawIndexResult(
         index: double.nan,
+        zH: double.nan,
+        zC: double.nan,
+        zBlank: double.nan,
+        zCotl: double.nan,
         level: 'ไม่มีข้อมูลมาตรฐาน',
-        mu: 0, sigma: 0, lowCut: 0, highCut: 0,
+        mu: 0,
+        sigma: 0,
+        lowCut: 0,
+        highCut: 0,
       );
     }
 
-    final idx = (-h) + c + (-blank) + (-cotl); // raw index
-    final low  = b.rawMean - b.rawSd;
+    // Z ของแต่ละ metric (สัญญาณกลับทิศให้เหมือนคะแนนรวม)
+    final double zH = -b.h.z(h);
+    final double zC = b.c.z(c);
+    final double zB = -b.blank.z(blank);
+    final double zO = -b.cotl.z(cotl);
+
+    // raw index
+    final idx = (-h) + c + (-blank) + (-cotl);
+
+    // band สำหรับแปลผล index (μ±σ ของ "raw index")
+    final low = b.rawMean - b.rawSd;
     final high = b.rawMean + b.rawSd;
     final level = (idx < low)
         ? 'ต่ำกว่ามาตรฐาน'
         : (idx > high)
-            ? 'สูงกว่ามาตรฐาน'
-            : 'อยู่ในเกณฑ์มาตรฐาน';
+        ? 'สูงกว่ามาตรฐาน'
+        : 'อยู่ในเกณฑ์มาตรฐาน';
 
     return RawIndexResult(
       index: idx,
+      zH: zH,
+      zC: zC,
+      zBlank: zB,
+      zCotl: zO,
       level: level,
       mu: b.rawMean,
       sigma: b.rawSd,
       lowCut: low,
       highCut: high,
     );
-    // หมายเหตุ: ถ้าต้องการให้ช่วงปรับได้ (เช่น k=1.5) ค่อยเพิ่มพารามิเตอร์ในภายหลัง
   }
 
   /// ============== (เดิม) Z-sum ==============
@@ -183,8 +222,8 @@ class ZScoreService {
     await ensureLoaded();
 
     final tk = _normalizeTemplate(templateKey);
-    final a  = _closestAgeGroup(age);
-    final b  = _stats[tk]?[a];
+    final a = _closestAgeGroup(age);
+    final b = _stats[tk]?[a];
 
     if (b == null) {
       return const ZScoreResult(
@@ -198,18 +237,18 @@ class ZScoreService {
     }
 
     final zH = -b.h.z(h);
-    final zC =  b.c.z(c);
+    final zC = b.c.z(c);
     final zB = -b.blank.z(blank);
     final zO = -b.cotl.z(cotl);
     final zSum = zH + zC + zB + zO;
 
-    final low  = b.zsumMean - bandK * b.zsumSd;
+    final low = b.zsumMean - bandK * b.zsumSd;
     final high = b.zsumMean + bandK * b.zsumSd;
     final level = (zSum < low)
         ? 'ต่ำกว่ามาตรฐาน'
         : (zSum > high)
-            ? 'สูงกว่ามาตรฐาน'
-            : 'อยู่ในเกณฑ์มาตรฐาน';
+        ? 'สูงกว่ามาตรฐาน'
+        : 'อยู่ในเกณฑ์มาตรฐาน';
 
     return ZScoreResult(
       zH: zH,
@@ -228,9 +267,10 @@ class ZScoreService {
   /// ดึงช่วงอ้างอิง RAW (ถ้าต้องแสดงอย่างเดียว)
   IndexBand bandForRaw(String templateKey, int age, {double k = 1.0}) {
     final tk = _normalizeTemplate(templateKey);
-    final a  = _closestAgeGroup(age);
-    final b  = _stats[tk]?[a];
-    if (b == null) return const IndexBand(mu: 0, sigma: 0, low: 0, high: 0, k: 1.0);
+    final a = _closestAgeGroup(age);
+    final b = _stats[tk]?[a];
+    if (b == null)
+      return const IndexBand(mu: 0, sigma: 0, low: 0, high: 0, k: 1.0);
     return IndexBand(
       mu: b.rawMean,
       sigma: b.rawSd,
@@ -250,26 +290,33 @@ class ZScoreService {
     if (lines.isEmpty) return;
 
     final header = _splitCsvLine(lines.first);
-    final iName  = header.indexWhere((x) => x.toLowerCase() == 'name');
-    final iH     = header.indexWhere((x) => x.toLowerCase() == 'h');
-    final iC     = header.indexWhere((x) => x.toLowerCase() == 'c');
+    final iName = header.indexWhere((x) => x.toLowerCase() == 'name');
+    final iH = header.indexWhere((x) => x.toLowerCase() == 'h');
+    final iC = header.indexWhere((x) => x.toLowerCase() == 'c');
     final iBlank = header.indexWhere((x) => x.toLowerCase() == 'blank');
-    final iCOTL  = header.indexWhere((x) => x.toLowerCase() == 'cotl');
-    final iAge   = header.indexWhere((x) => x.toLowerCase() == 'age');
+    final iCOTL = header.indexWhere((x) => x.toLowerCase() == 'cotl');
+    final iAge = header.indexWhere((x) => x.toLowerCase() == 'age');
 
     final Map<String, Map<int, List<List<double>>>> groups = {};
 
     for (var i = 1; i < lines.length; i++) {
       final cols = _splitCsvLine(lines[i]);
-      if ([iName, iH, iC, iBlank, iCOTL, iAge].any((x) => x < 0 || x >= cols.length)) {
+      if ([
+        iName,
+        iH,
+        iC,
+        iBlank,
+        iCOTL,
+        iAge,
+      ].any((x) => x < 0 || x >= cols.length)) {
         continue;
       }
       final template = _normalizeTemplate(_inferTemplate(cols[iName]));
-      final age      = int.tryParse(cols[iAge].trim()) ?? 0;
-      final h        = double.tryParse(cols[iH]) ?? 0;
-      final c        = double.tryParse(cols[iC]) ?? 0;
-      final blank    = double.tryParse(cols[iBlank]) ?? 0;
-      final cotl     = double.tryParse(cols[iCOTL]) ?? 0;
+      final age = int.tryParse(cols[iAge].trim()) ?? 0;
+      final h = double.tryParse(cols[iH]) ?? 0;
+      final c = double.tryParse(cols[iC]) ?? 0;
+      final blank = double.tryParse(cols[iBlank]) ?? 0;
+      final cotl = double.tryParse(cols[iCOTL]) ?? 0;
 
       groups.putIfAbsent(template, () => {});
       groups[template]!.putIfAbsent(age, () => []);
@@ -295,7 +342,7 @@ class ZScoreService {
 
         for (final r in rows) {
           final zH = -hStat.z(r[0]);
-          final zC =  cStat.z(r[1]);
+          final zC = cStat.z(r[1]);
           final zB = -bStat.z(r[2]);
           final zO = -oStat.z(r[3]);
           zSums.add(zH + zC + zB + zO);
@@ -305,7 +352,7 @@ class ZScoreService {
         }
 
         final zsumStat = _calc(zSums);
-        final rawStat  = _calc(rawIdx);
+        final rawStat = _calc(rawIdx);
 
         tmp[tpl]![age] = _MetricStatsBundle(
           h: hStat,
@@ -341,7 +388,10 @@ class ZScoreService {
   // ---------------- helpers ----------------
   String _normalizeTemplate(String s) {
     final x = s.trim().toLowerCase();
-    if (x.contains('ice') || x.contains('cream') || x.contains('ไอศกรีม') || x.contains('ไอติม')) {
+    if (x.contains('ice') ||
+        x.contains('cream') ||
+        x.contains('ไอศกรีม') ||
+        x.contains('ไอติม')) {
       return 'ไอศกรีม';
     }
     if (x.contains('fish') || x.contains('ปลา')) return 'ปลา';
@@ -359,8 +409,12 @@ class ZScoreService {
 // เดา template จากชื่อไฟล์/ชื่อรูป
 String _inferTemplate(String nameRaw) {
   final n = nameRaw.toLowerCase();
-  if (n.contains('ice') || n.contains('icecream') || n.contains('ice-cream') ||
-      n.contains('ice_cream') || n.contains('ไอศกรีม') || n.contains('ไอติม')) {
+  if (n.contains('ice') ||
+      n.contains('icecream') ||
+      n.contains('ice-cream') ||
+      n.contains('ice_cream') ||
+      n.contains('ไอศกรีม') ||
+      n.contains('ไอติม')) {
     return 'ไอศกรีม';
   }
   if (n.contains('fish') || n.contains('ปลา')) return 'ปลา';
@@ -368,4 +422,5 @@ String _inferTemplate(String nameRaw) {
   return nameRaw;
 }
 
-List<String> _splitCsvLine(String line) => line.split(',').map((e) => e.trim()).toList();
+List<String> _splitCsvLine(String line) =>
+    line.split(',').map((e) => e.trim()).toList();
