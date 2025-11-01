@@ -15,7 +15,7 @@ import '../../services/metrics/cotl_cv.dart';
 import '../../services/metrics/entropy_cv.dart';
 import '../../services/metrics/complexity_cv.dart';
 
-// สำหรับบันทึกประวัติ
+// สำหรับบันทึกประวัติ (แบบไฟล์ JSON/รูปใน Documents)
 import '../../data/models/history_record.dart';
 import '../../data/repositories/history_repo.dart';
 
@@ -84,7 +84,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         (profile?['key'] ??
                 profile?['id'] ??
                 profile?['profileKey'] ??
-                profile?['name'] ?? // ถ้าใช้ชื่อเป็นคีย์
+                profile?['name'] ??
                 '')
             .toString();
 
@@ -283,7 +283,6 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 
       // 6) บันทึกประวัติ (PNG + record)
       try {
-        // encode PNG ของภาพผลลัพธ์
         final Uint8List pngBytes = Uint8List.fromList(
           cv.imencode('.png', bgr).$2.toList(),
         );
@@ -307,13 +306,13 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
           c: comp,
           blank: blank,
           cotl: cotl,
-          // ✅ z-values มาจาก compute() (ไม่ใช่ผล raw)
+          // z-values (มาตรฐาน)
           zH: z.zH,
           zC: z.zC,
           zBlank: z.zBlank,
           zCotl: z.zCotl,
           zSum: z.zSum,
-          // ✅ ระดับและไฟล์
+          // ระดับและไฟล์
           level: raw.level,
           imagePath: imagePath,
         );
@@ -346,6 +345,69 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       if (!mounted) return;
       setState(() => _error = e.toString());
     }
+  }
+
+  // ⭐ แปลงข้อความ level -> จำนวนดาว (1..5) แล้ววาดเป็นไอคอน
+  Widget _buildStarLevel(String? level) {
+    if (level == null || level.trim().isEmpty) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: List.generate(
+          5,
+          (i) => Icon(
+            Icons.star_border_rounded,
+            size: 28,
+            color: Colors.grey.shade400,
+          ),
+        ),
+      );
+    }
+
+    final s = level.toLowerCase();
+    int stars = 3; // พื้นฐาน = ปกติ
+
+    // รองรับทั้งไทย/อังกฤษ
+    final very = s.contains('มาก'); // very
+    final hi =
+        s.contains('สูง') ||
+        s.contains('ดีกว่า') ||
+        s.contains('above') ||
+        s.contains('better');
+    final low =
+        s.contains('ต่ำ') ||
+        s.contains('ต่ำกว่า') ||
+        s.contains('below') ||
+        s.contains('worse');
+    final normal =
+        s.contains('ปกติ') ||
+        s.contains('เกณฑ์') ||
+        s.contains('within') ||
+        s.contains('normal') ||
+        s.contains('standard');
+
+    if (hi && very) {
+      stars = 5;
+    } else if (hi) {
+      stars = 4;
+    } else if (low && very) {
+      stars = 1;
+    } else if (low) {
+      stars = 2;
+    } else if (normal) {
+      stars = 3;
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(
+        5,
+        (i) => Icon(
+          i < stars ? Icons.star_rounded : Icons.star_border_rounded,
+          size: 28,
+          color: i < stars ? Colors.amber : Colors.grey.shade400,
+        ),
+      ),
+    );
   }
 
   // ---------- UI ----------
@@ -420,15 +482,24 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
                 style: theme.textTheme.bodySmall,
               ),
             ),
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Chip(label: Text('การแปลผล: ${_level ?? '-'}')),
+
+          const SizedBox(height: 10),
+          const Text(
+            'การแปลผลโดยภาพรวม',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 6),
+          _buildStarLevel(_level), // ⭐ แสดงดาวตามระดับ
+          const SizedBox(height: 4),
+          Text(
+            _level ?? '-',
+            style: const TextStyle(fontSize: 14, color: Colors.black54),
           ),
 
           const SizedBox(height: 32),
           ElevatedButton.icon(
-            // ✅ ย้อนกลับแค่หนึ่งหน้า → TemplatePicker
-            onPressed: () => Navigator.pop(context),
+            onPressed: () =>
+                Navigator.pop(context), // ย้อนกลับไป TemplatePicker
             icon: const Icon(Icons.home_outlined),
             label: const Text('กลับไปหน้าเลือกเทมเพลต'),
             style: ElevatedButton.styleFrom(

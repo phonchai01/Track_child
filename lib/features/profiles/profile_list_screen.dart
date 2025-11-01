@@ -1,6 +1,8 @@
+// lib/features/profiles/profile_list_screen.dart
 import 'package:flutter/material.dart';
 import '../../data/repositories/cohort_repo.dart';
 import '../templates/template_picker_screen.dart';
+import '../../routes.dart';
 
 class ProfileListScreen extends StatefulWidget {
   const ProfileListScreen({super.key});
@@ -21,101 +23,59 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
   }
 
   Future<void> _load() async {
-    final data = await _repo.getAll();
+    final data = await _repo.getAll(); // [{id, name, age, ...}]
     setState(() {
       _items = data;
       _loading = false;
     });
   }
 
-  Future<void> _showAddDialog() async {
-    final nameCtrl = TextEditingController();
-    int age = 4;
-
-    final ok = await showDialog<bool>(
+  // ----------------- Add/Edit/Delete -----------------
+  Future<void> _openEditor({Map<String, dynamic>? edit}) async {
+    final result = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: const Text('สร้างโปรไฟล์ใหม่'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'ชื่อเด็ก',
-                ),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  const Text('อายุ:'),
-                  const SizedBox(width: 12),
-                  StatefulBuilder(
-                    builder: (_, setLocal) {
-                      return DropdownButton<int>(
-                        value: age,
-                        items: const [
-                          DropdownMenuItem(value: 4, child: Text('4 ขวบ')),
-                          DropdownMenuItem(value: 5, child: Text('5 ขวบ')),
-                        ],
-                        onChanged: (v) {
-                          if (v == null) return;
-                          setLocal(() => age = v);
-                        },
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('ยกเลิก'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                if (nameCtrl.text.trim().isEmpty) return;
-                Navigator.pop(ctx, true);
-              },
-              child: const Text('บันทึก'),
-            ),
-          ],
-        );
-      },
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (_) => _ProfileEditor(initial: edit),
     );
+    if (result == null) return;
 
-    if (ok == true) {
-      await _repo.add(name: nameCtrl.text.trim(), age: age);
-      await _load();
+    if (edit == null) {
+      await _repo.add(
+        name: result['name'] as String,
+        age: result['age'] as int,
+      );
+    } else {
+      // ถ้า CohortRepo มี update ให้ใช้ด้านล่างแทน
+      // await _repo.update(id: edit['id'], name: result['name'], age: result['age']);
+      await _repo.remove(edit['id'] as String);
+      await _repo.add(
+        name: result['name'] as String,
+        age: result['age'] as int,
+      );
     }
+    await _load();
   }
 
   Future<void> _confirmDelete(Map<String, dynamic> item) async {
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: const Text('ยืนยันการลบ'),
-          content: Text('ลบโปรไฟล์ “${item['name']}” ใช่หรือไม่?'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('ยกเลิก'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('ลบ'),
-            ),
-          ],
-        );
-      },
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('ลบโปรไฟล์นี้?'),
+        content: Text('“${item['name']}” (อายุ ${item['age']} ขวบ) จะถูกลบ'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('ยกเลิก'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('ลบ'),
+          ),
+        ],
+      ),
     );
-
     if (ok == true) {
       await _repo.remove(item['id'] as String);
       await _load();
@@ -123,78 +83,356 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
   }
 
   void _openTemplates(Map<String, dynamic> item) {
+    // ไปหน้า TemplatePicker พร้อมส่ง profile object ทั้งก้อน
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => const TemplatePickerScreen(),
-        settings: RouteSettings(arguments: {
-          'profile': item,   // ✅ ใช้ item แทน it
-        }),
+        settings: RouteSettings(arguments: {'profile': item}),
       ),
     );
   }
 
+  void _openHistory(Map<String, dynamic> item) {
+    final key = (item['id'] ?? item['key'] ?? item['name']).toString();
+    Nav.toHistory(context, key);
+  }
+
+  // ----------------- UI -----------------
   @override
   Widget build(BuildContext context) {
-    final titleStyle = Theme.of(context).textTheme.titleLarge;
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
 
     return Scaffold(
       appBar: AppBar(
-        automaticallyImplyLeading: false, // ✅ ซ่อนปุ่มย้อนกลับ
-        title: Text('เลือกโปรไฟล์เด็ก', style: titleStyle),
-        actions: const [],
+        automaticallyImplyLeading: false,
+        title: const Text('เลือกโปรไฟล์เด็ก'),
+        actions: [
+          if (!_loading)
+            Padding(
+              padding: const EdgeInsets.only(right: 12),
+              child: Chip(
+                label: Text('${_items.length} โปรไฟล์'),
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+        ],
       ),
 
-      floatingActionButton: FloatingActionButton(
-        onPressed: _showAddDialog,
-        child: const Icon(Icons.add),
-      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _items.isEmpty
-              ? const _EmptyView()
-              : ListView.separated(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
-                  itemBuilder: (_, i) {
-                    final it = _items[i];
-                    return ListTile(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      tileColor: Theme.of(context).colorScheme.surface,
-                      leading: const CircleAvatar(child: Icon(Icons.person)),
-                      title: Text(it['name'] as String),
-                      subtitle: Text('อายุ: ${(it['age'] as int)} ขวบ'),
-                      onTap: () => _openTemplates(it),       // ✅ แค่เรียกเมธอด
-                      trailing: IconButton(
-                        icon: const Icon(Icons.delete_outline),
-                        onPressed: () => _confirmDelete(it),
-                      ),
-                    );
+          ? _EmptyState(onAdd: () => _openEditor())
+          : ListView.separated(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
+              itemCount: _items.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 10),
+              itemBuilder: (context, i) {
+                final it = _items[i];
+                final idOrKey = (it['id'] ?? it['key'] ?? it['name'])
+                    .toString();
+                return Dismissible(
+                  key: ValueKey(idOrKey),
+                  direction: DismissDirection.endToStart,
+                  confirmDismiss: (_) async {
+                    await _confirmDelete(it);
+                    return false; // เราจัดการลบเอง แล้วรีเฟรช
                   },
-                  separatorBuilder: (_, __) => const SizedBox(height: 8),
-                  itemCount: _items.length,
-                ),
+                  background: _deleteBg(cs.errorContainer, cs.onErrorContainer),
+                  child: _ProfileCard(
+                    name: (it['name'] as String?)?.trim().isEmpty == true
+                        ? 'ไม่ทราบชื่อ'
+                        : it['name'] as String,
+                    age: (it['age'] as int?) ?? 0,
+                    onOpen: () => _openTemplates(it),
+                    onEdit: () => _openEditor(edit: it),
+                    onDelete: () => _confirmDelete(it),
+                  ),
+                );
+              },
+            ),
 
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _openEditor,
+        icon: const Icon(Icons.add_rounded),
+        label: const Text('โปรไฟล์ใหม่'),
+      ),
+    );
+  }
+
+  Widget _deleteBg(Color bg, Color fg) => Container(
+    alignment: Alignment.centerRight,
+    padding: const EdgeInsets.symmetric(horizontal: 20),
+    decoration: BoxDecoration(
+      color: bg,
+      borderRadius: BorderRadius.circular(16),
+    ),
+    child: Icon(Icons.delete_rounded, color: fg),
+  );
+}
+
+class _ProfileCard extends StatelessWidget {
+  const _ProfileCard({
+    required this.name,
+    required this.age,
+    required this.onOpen,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  final String name;
+  final int age;
+  final VoidCallback onOpen;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+
+  String get initials {
+    final parts = name.trim().split(RegExp(r'\s+'));
+    if (parts.isEmpty || parts.first.isEmpty) return '👦';
+    if (parts.length == 1) return parts.first.characters.first.toUpperCase();
+    return (parts.first.characters.first + parts.last.characters.first)
+        .toUpperCase();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    return Material(
+      color: cs.surface,
+      elevation: 0.5,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: onOpen,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              _Avatar(initials: initials),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'อายุ $age ขวบ',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.hintColor,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Wrap(
+                spacing: 6,
+                children: [
+                  IconButton.filledTonal(
+                    tooltip: 'แก้ไข',
+                    onPressed: onEdit,
+                    icon: const Icon(Icons.edit_rounded),
+                  ),
+                  IconButton(
+                    tooltip: 'ลบ',
+                    onPressed: onDelete,
+                    icon: const Icon(Icons.delete_outline_rounded),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
 
-class _EmptyView extends StatelessWidget {
-  const _EmptyView();
+class _Avatar extends StatelessWidget {
+  const _Avatar({required this.initials});
+  final String initials;
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: 56,
+      height: 56,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [cs.primaryContainer, cs.secondaryContainer],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        initials,
+        style: Theme.of(
+          context,
+        ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+      ),
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  const _EmptyState({required this.onAdd});
+  final VoidCallback onAdd;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          children: const [
-            Icon(Icons.child_care, size: 56),
-            SizedBox(height: 8),
-            Text('ยังไม่มีโปรไฟล์\nกดปุ่ม + เพื่อสร้างโปรไฟล์ใหม่', textAlign: TextAlign.center),
+          children: [
+            Icon(
+              Icons.family_restroom_rounded,
+              size: 72,
+              color: theme.hintColor,
+            ),
+            const SizedBox(height: 12),
+            Text('ยังไม่มีโปรไฟล์เด็ก', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 6),
+            Text(
+              'เพิ่มโปรไฟล์แรกเพื่อเริ่มต้นวัดผลการระบายสี',
+              style: theme.textTheme.bodySmall,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: onAdd,
+              icon: const Icon(Icons.add_rounded),
+              label: const Text('สร้างโปรไฟล์ใหม่'),
+            ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// BottomSheet สร้าง/แก้ไขโปรไฟล์ (ชื่อ + อายุ 4/5)
+class _ProfileEditor extends StatefulWidget {
+  const _ProfileEditor({this.initial});
+  final Map<String, dynamic>? initial;
+
+  @override
+  State<_ProfileEditor> createState() => _ProfileEditorState();
+}
+
+class _ProfileEditorState extends State<_ProfileEditor> {
+  final _form = GlobalKey<FormState>();
+  final _nameCtrl = TextEditingController();
+  int _age = 4;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initial != null) {
+      _nameCtrl.text = (widget.initial!['name'] as String?) ?? '';
+      _age = (widget.initial!['age'] as int?) ?? 4;
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (!_form.currentState!.validate()) return;
+    Navigator.pop(context, {'name': _nameCtrl.text.trim(), 'age': _age});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final inset = MediaQuery.of(context).viewInsets.bottom;
+
+    return Padding(
+      padding: EdgeInsets.only(bottom: inset),
+      child: Form(
+        key: _form,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                widget.initial == null ? 'สร้างโปรไฟล์ใหม่' : 'แก้ไขโปรไฟล์',
+                style: theme.textTheme.titleLarge,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _nameCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'ชื่อเด็ก',
+                  prefixIcon: Icon(Icons.badge_outlined),
+                  border: OutlineInputBorder(),
+                ),
+                textInputAction: TextInputAction.done,
+                validator: (v) {
+                  if (v == null || v.trim().isEmpty) return 'กรอกชื่อก่อนนะ';
+                  if (v.trim().length < 2) return 'ชื่อสั้นไปนิด';
+                  return null;
+                },
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Text('อายุ', style: theme.textTheme.titleMedium),
+                  const SizedBox(width: 12),
+                  ChoiceChip(
+                    label: const Text('4 ขวบ'),
+                    selected: _age == 4,
+                    onSelected: (_) => setState(() => _age = 4),
+                  ),
+                  const SizedBox(width: 8),
+                  ChoiceChip(
+                    label: const Text('5 ขวบ'),
+                    selected: _age == 5,
+                    onSelected: (_) => setState(() => _age = 5),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close_rounded),
+                      label: const Text('ยกเลิก'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: _submit,
+                      icon: const Icon(Icons.check_rounded),
+                      label: const Text('ยืนยัน'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
         ),
       ),
     );

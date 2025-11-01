@@ -136,10 +136,11 @@ class _HistoryListScreenState extends State<HistoryListScreen> {
 
   // map ชื่อระดับหลายแบบ -> low/normal/high
   String _normalizeLevel(String s) {
-    final x = s.trim();
-    if (x.contains('ต่ำ')) return 'low';
-    if (x.contains('สูง')) return 'high';
-    // กรณีเหลือถือเป็นมาตรฐาน
+    final x = s.trim().toLowerCase();
+    if (x.contains('ต่ำ') || x.contains('below') || x.contains('worse'))
+      return 'low';
+    if (x.contains('สูง') || x.contains('above') || x.contains('better'))
+      return 'high';
     return 'normal';
   }
 
@@ -158,6 +159,50 @@ class _HistoryListScreenState extends State<HistoryListScreen> {
           : a.createdAt.compareTo(b.createdAt),
     );
     return filtered;
+  }
+
+  // ---------- ⭐ Stars ----------
+  int _starsFromLevel(String level) {
+    final s = level.toLowerCase();
+    final very = s.contains('มาก'); // very
+    final hi =
+        s.contains('สูง') ||
+        s.contains('above') ||
+        s.contains('better') ||
+        s.contains('greater');
+    final low =
+        s.contains('ต่ำ') ||
+        s.contains('below') ||
+        s.contains('worse') ||
+        s.contains('under');
+    final normal =
+        s.contains('ปกติ') ||
+        s.contains('เกณฑ์') ||
+        s.contains('within') ||
+        s.contains('normal') ||
+        s.contains('standard');
+
+    if (hi && very) return 5;
+    if (hi) return 4;
+    if (low && very) return 1;
+    if (low) return 2;
+    if (normal) return 3;
+    return 3; // fallback กลาง ๆ
+  }
+
+  Widget _starRow(String level) {
+    final stars = _starsFromLevel(level);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(
+        5,
+        (i) => Icon(
+          i < stars ? Icons.star_rounded : Icons.star_border_rounded,
+          size: 18,
+          color: i < stars ? Colors.amber : Colors.grey.shade400,
+        ),
+      ),
+    );
   }
 
   // ---------------- UI ----------------
@@ -179,7 +224,6 @@ class _HistoryListScreenState extends State<HistoryListScreen> {
           ),
         ],
       ),
-
       body: Column(
         children: [
           _FilterBar(
@@ -197,7 +241,6 @@ class _HistoryListScreenState extends State<HistoryListScreen> {
             },
           ),
           const Divider(height: 1),
-
           Expanded(
             child: FutureBuilder<List<HistoryRecord>>(
               future: _future,
@@ -287,10 +330,14 @@ class _HistoryListScreenState extends State<HistoryListScreen> {
                                         context,
                                       ).textTheme.titleMedium,
                                     ),
-                                    const SizedBox(height: 4),
-                                    Chip(
-                                      label: Text(r.level),
-                                      visualDensity: VisualDensity.compact,
+                                    const SizedBox(height: 6),
+                                    _starRow(r.level), // ⭐ แสดงดาว
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      r.level,
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.labelSmall,
                                     ),
                                   ],
                                 ),
@@ -384,18 +431,12 @@ class _FilterBar extends StatelessWidget {
                   value: lvl,
                   items: const [
                     DropdownMenuItem(value: 'all', child: Text('ทั้งหมด')),
-                    DropdownMenuItem(
-                      value: 'low',
-                      child: Text('ต่ำกว่ามาตรฐาน'),
-                    ),
+                    DropdownMenuItem(value: 'low', child: Text('ต่ำ/ต่ำมาก')),
                     DropdownMenuItem(
                       value: 'normal',
-                      child: Text('อยู่ในเกณฑ์มาตรฐาน'),
+                      child: Text('ปกติ/ตามเกณฑ์'),
                     ),
-                    DropdownMenuItem(
-                      value: 'high',
-                      child: Text('สูงกว่ามาตรฐาน'),
-                    ),
+                    DropdownMenuItem(value: 'high', child: Text('สูง/สูงมาก')),
                   ],
                   onChanged: (v) => onChanged(tpl, age, v ?? 'all', desc),
                 ),

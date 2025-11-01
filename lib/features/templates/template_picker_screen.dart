@@ -5,8 +5,8 @@ import '../history/history_list_screen.dart';
 
 class TemplateSpec {
   final String key; // 'fish' | 'pencil' | 'icecream'
-  final String title; // ชื่อที่โชว์บนการ์ด (ไทย)
-  final String templateAssetPath; // เผื่อใช้งานภายหลัง
+  final String title; // ชื่อไทยโชว์บนการ์ด
+  final String templateAssetPath; // ภาพตัวอย่าง (ถ้ามี)
 
   const TemplateSpec({
     required this.key,
@@ -19,12 +19,12 @@ const kTemplates = <TemplateSpec>[
   TemplateSpec(
     key: 'fish',
     title: 'ปลา',
-    templateAssetPath: 'assets/templates/template_fish.png',
+    templateAssetPath: 'assets/templates/fish.png',
   ),
   TemplateSpec(
     key: 'pencil',
     title: 'ดินสอ',
-    templateAssetPath: 'assets/templates/template_pencil.png',
+    templateAssetPath: 'assets/templates/pencil.png',
   ),
   TemplateSpec(
     key: 'icecream',
@@ -51,11 +51,8 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
   void _onSelect(String key) => setState(() => _selectedKey = key);
 
   String _titleForKey(String key) {
-    // ถ้ามีใน kTemplates ใช้ชื่อจากนั้นก่อน
     final hit = kTemplates.where((e) => e.key == key);
     if (hit.isNotEmpty) return hit.first.title;
-
-    // fallback กัน key แปลก ๆ
     switch (key) {
       case 'fish':
         return 'ปลา';
@@ -77,7 +74,17 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('เลือกเทมเพลต'),
+        centerTitle: false,
         actions: [
+          if (profileKey.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: ActionChip(
+                avatar: const Icon(Icons.badge_outlined, size: 18),
+                label: Text('โปรไฟล์: $profileKey'),
+                onPressed: () {}, // just info
+              ),
+            ),
           IconButton(
             icon: const Icon(Icons.history),
             tooltip: 'ดูประวัติการประเมิน',
@@ -98,92 +105,47 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
           ),
         ],
       ),
+
       body: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
         child: GridView.builder(
           itemCount: kTemplates.length,
           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 2,
-            childAspectRatio: 0.85,
+            // ปรับสัดส่วนให้ไม่ล้น (สูงกว่ากว้างนิดหน่อย)
+            childAspectRatio: 0.78,
             crossAxisSpacing: 12,
             mainAxisSpacing: 12,
           ),
           itemBuilder: (_, i) {
             final t = kTemplates[i];
             final isSel = t.key == _selectedKey;
-            return InkWell(
+            return _TemplateCard(
+              spec: t,
+              selected: isSel,
               onTap: () => _onSelect(t.key),
-              borderRadius: BorderRadius.circular(16),
-              child: Container(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                    color: isSel ? Colors.blue : Colors.grey.shade400,
-                    width: isSel ? 2.0 : 1.0,
-                  ),
-                  color: isSel
-                      ? Colors.blue.withOpacity(0.05)
-                      : Colors.grey.withOpacity(0.06),
-                ),
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Spacer(),
-                    Icon(
-                      Icons.image_outlined,
-                      size: 48,
-                      color: Colors.grey.shade600,
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      t.title,
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: isSel ? FontWeight.w700 : FontWeight.w500,
-                      ),
-                    ),
-                    const Spacer(),
-                    Container(
-                      height: 34,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: isSel
-                            ? Colors.blueGrey.shade200
-                            : Colors.grey.shade300,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(
-                        t.title,
-                        style: TextStyle(
-                          color: isSel ? Colors.black : Colors.black87,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
             );
           },
         ),
       ),
+
       bottomNavigationBar: SafeArea(
         minimum: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-        child: ElevatedButton(
+        child: ElevatedButton.icon(
+          icon: const Icon(Icons.photo_camera_back_outlined),
           onPressed: (_selectedKey ?? '').isEmpty
               ? null
               : () {
-                  final key = _selectedKey!; // 'fish' | 'pencil' | 'icecream'
+                  final key = _selectedKey!;
+                  final title = _titleForKey(key);
                   final maskPath = 'assets/masks/${key}_mask.png';
-                  final title = _titleForKey(key); // ชื่อไทยของเทมเพลต
 
                   Navigator.push(
                     context,
                     MaterialPageRoute(
                       builder: (_) => ProcessingScreen(
                         maskAssetPath: maskPath,
-                        templateName: title, // ✅ ใช้ title ที่คำนวณ
+                        templateName: title,
                       ),
                       settings: RouteSettings(
                         arguments: {'profile': profile, 'template': key},
@@ -192,9 +154,133 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
                   );
                 },
           style: ElevatedButton.styleFrom(
-            minimumSize: const Size.fromHeight(48),
+            minimumSize: const Size.fromHeight(52),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
           ),
-          child: const Text('ไปเลือก/ถ่ายรูป'),
+          label: Text(
+            (_selectedKey ?? '').isEmpty
+                ? 'ไปเลือก/ถ่ายรูป'
+                : 'ไปเลือก/ถ่ายรูป – ${_titleForKey(_selectedKey!)}',
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TemplateCard extends StatelessWidget {
+  const _TemplateCard({
+    required this.spec,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final TemplateSpec spec;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final borderColor = selected
+        ? Theme.of(context).colorScheme.primary
+        : Colors.black12;
+    final fill = selected
+        ? Theme.of(context).colorScheme.primary.withOpacity(0.06)
+        : Colors.black12.withOpacity(0.04);
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: fill,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: borderColor, width: selected ? 2 : 1),
+          boxShadow: [
+            if (selected)
+              BoxShadow(
+                color: Theme.of(context).colorScheme.primary.withOpacity(0.12),
+                blurRadius: 10,
+                offset: const Offset(0, 6),
+              ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Thumbnail (คุมสูงแน่นอน = ไม่ล้น)
+            Container(
+              height: 110,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.black12),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.asset(
+                  spec.templateAssetPath,
+                  fit: BoxFit.contain,
+                  width: 120,
+                  height: 90,
+                  errorBuilder: (_, __, ___) => Icon(
+                    Icons.image_outlined,
+                    size: 40,
+                    color: Colors.grey.shade500,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            // Title
+            Text(
+              spec.title,
+              textAlign: TextAlign.center,
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 6),
+            // Sub pill
+            Container(
+              height: 34,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colors.black12.withOpacity(0.10),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                spec.title,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const Spacer(),
+            // Selected tick
+            Align(
+              alignment: Alignment.topRight,
+              child: AnimatedOpacity(
+                opacity: selected ? 1 : 0,
+                duration: const Duration(milliseconds: 160),
+                child: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.primary,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.check, size: 14, color: Colors.white),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
