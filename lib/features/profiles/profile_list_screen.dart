@@ -1,11 +1,13 @@
 // lib/features/profiles/profile_list_screen.dart
 import 'package:flutter/material.dart';
+
 import '../../data/repositories/cohort_repo.dart';
 import '../templates/template_picker_screen.dart';
 import '../../routes.dart';
 
 class ProfileListScreen extends StatefulWidget {
   const ProfileListScreen({super.key});
+
   @override
   State<ProfileListScreen> createState() => _ProfileListScreenState();
 }
@@ -35,18 +37,22 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
 
   List<Map<String, dynamic>> get _visible {
     var list = List<Map<String, dynamic>>.from(_items);
+
     if (_ageFilter != null) {
       list = list.where((e) => (e['age'] as int?) == _ageFilter).toList();
     }
+
     final q = _searchCtrl.text.trim().toLowerCase();
     if (q.isNotEmpty) {
       list = list
           .where((e) => (e['name']?.toString().toLowerCase() ?? '').contains(q))
           .toList();
     }
+
     if (_sort == 'name') {
       list.sort((a, b) => (a['name'] ?? '').compareTo(b['name'] ?? ''));
     } else {
+      // recent: อันล่าสุดอยู่บนสุด
       list = list.reversed.toList();
     }
     return list;
@@ -62,12 +68,13 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
       ),
       builder: (_) => _ProfileEditor(initial: edit),
     );
+
     if (result == null) return;
 
     if (edit == null) {
       await _repo.add(name: result['name'], age: result['age']);
     } else {
-      // ถ้ามี update() ใช้อันนั้นแทน
+      // โค้ดง่ายๆ: ลบแล้วเพิ่มใหม่ (ถ้า _repo มี update() ใช้แทนได้)
       await _repo.remove(edit['id'] as String);
       await _repo.add(name: result['name'], age: result['age']);
     }
@@ -93,6 +100,7 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
         ],
       ),
     );
+
     if (ok == true) {
       await _repo.remove(item['id'] as String);
       await _load();
@@ -114,16 +122,15 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
     Nav.toHistory(context, key);
   }
 
-  // ===== 🎨 Fresh & Vibrant Palette (อิงอายุ) =====
-  // 4 ขวบ: sky→violet   |  5 ขวบ: coral→sunshine
-  List<Color> _avatarGradient(int age, ColorScheme cs) => age == 5
+  // ===== Palette (โทนสด) ตามอายุ =====
+  List<Color> _avatarGradient(int age) => age == 5
       ? const [Color(0xFFFF8A80), Color(0xFFFFD54F)] // coral -> sunshine
       : const [Color(0xFF7CC8FF), Color(0xFFA97BFF)]; // sky   -> violet
   Color _cardBorder(int age) =>
       age == 5 ? const Color(0xFFFFC1B3) : const Color(0xFFBDA7FF);
-  Color _badgeBg(int age, ColorScheme cs) =>
+  Color _badgeBg(int age) =>
       age == 5 ? const Color(0xFFFFE3DC) : const Color(0xFFE8DEFF);
-  Color _badgeFg(int age, ColorScheme cs) =>
+  Color _badgeFg(int age) =>
       age == 5 ? const Color(0xFF5D2B23) : const Color(0xFF2E1E6B);
   Color _chipSelectedBg(int? age) =>
       age == 5 ? const Color(0xFFFFF0E0) : const Color(0xFFEDE4FF);
@@ -138,7 +145,6 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
         onPressed: _openEditor,
         icon: const Icon(Icons.add_rounded),
         label: const Text('โปรไฟล์ใหม่'),
-        // ✅ สดชื่นขึ้น
         backgroundColor: const Color(0xFF7C4DFF),
         foregroundColor: Colors.white,
       ),
@@ -148,7 +154,7 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
               onRefresh: _load,
               child: CustomScrollView(
                 slivers: [
-                  // ---------- AppBar + Search ----------
+                  // ---------- SliverAppBar + Search ----------
                   SliverAppBar(
                     pinned: true,
                     expandedHeight: 118,
@@ -201,23 +207,20 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
                               ),
                               isDense: true,
                               filled: true,
-                              fillColor: const Color(0xFFEFF7FF), // ✅ ฟ้าใส
+                              fillColor: const Color(0xFFEFF7FF),
                               border: OutlineInputBorder(
-                                borderSide: const BorderSide(
-                                  color: Color(0xFFB3E0FF),
-                                ),
+                                borderSide:
+                                    const BorderSide(color: Color(0xFFB3E0FF)),
                                 borderRadius: BorderRadius.circular(14),
                               ),
                               enabledBorder: OutlineInputBorder(
-                                borderSide: const BorderSide(
-                                  color: Color(0xFFB3E0FF),
-                                ),
+                                borderSide:
+                                    const BorderSide(color: Color(0xFFB3E0FF)),
                                 borderRadius: BorderRadius.circular(14),
                               ),
                               focusedBorder: OutlineInputBorder(
-                                borderSide: const BorderSide(
-                                  color: Color(0xFF7C4DFF), // ✅ ม่วงสด
-                                ),
+                                borderSide:
+                                    const BorderSide(color: Color(0xFF7C4DFF)),
                                 borderRadius: BorderRadius.circular(14),
                               ),
                             ),
@@ -227,7 +230,7 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
                     ),
                   ),
 
-                  // ---------- Sticky Filter (Wrap) ----------
+                  // ---------- Sticky Filter ----------
                   SliverPersistentHeader(
                     pinned: true,
                     delegate: _StickyWrapHeader(
@@ -254,18 +257,15 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
                             selectedBg: _chipSelectedBg(5),
                             onTap: () => setState(() => _ageFilter = 5),
                           ),
-                          // ตัวนับจำนวนรวม (โทนสดขึ้น)
+                          // ตัวนับจำนวนทั้งหมด
                           Container(
                             padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 6,
-                            ),
+                                horizontal: 10, vertical: 6),
                             decoration: BoxDecoration(
                               color: const Color(0xFFEAF4FF),
                               borderRadius: BorderRadius.circular(999),
-                              border: Border.all(
-                                color: const Color(0xFFB3E0FF),
-                              ),
+                              border:
+                                  Border.all(color: const Color(0xFFB3E0FF)),
                             ),
                             child: Text(
                               '${_items.length}',
@@ -292,12 +292,13 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
                       padding: const EdgeInsets.fromLTRB(12, 12, 12, 110),
                       sliver: SliverGrid.builder(
                         gridDelegate:
-                            const SliverGridDelegateWithMaxCrossAxisExtent(
-                              maxCrossAxisExtent: 240,
-                              crossAxisSpacing: 10,
-                              mainAxisSpacing: 10,
-                              childAspectRatio: .98,
-                            ),
+                            const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 2,
+                          // ✨ ทำให้การ์ด “สูงขึ้นนิด” เพื่อตัดปัญหาล้นแนวตั้ง
+                          childAspectRatio: 0.80,
+                          crossAxisSpacing: 12,
+                          mainAxisSpacing: 12,
+                        ),
                         itemCount: _visible.length,
                         itemBuilder: (_, i) {
                           final it = _visible[i];
@@ -316,8 +317,7 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
                               cs.onErrorContainer,
                             ),
                             child: _GridProfileCard(
-                              name:
-                                  (it['name'] as String?)?.trim().isEmpty ==
+                              name: (it['name'] as String?)?.trim().isEmpty ==
                                       true
                                   ? 'ไม่ทราบชื่อ'
                                   : it['name'] as String,
@@ -327,12 +327,11 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
                               onDelete: () => _confirmDelete(it),
                               onHistory: () => _openHistory(it),
                               avatarGradient: _avatarGradient(
-                                (it['age'] as int?) ?? 0,
-                                cs,
-                              ),
-                              cardBorder: _cardBorder((it['age'] as int?) ?? 0),
-                              badgeBg: _badgeBg((it['age'] as int?) ?? 0, cs),
-                              badgeFg: _badgeFg((it['age'] as int?) ?? 0, cs),
+                                  (it['age'] as int?) ?? 0),
+                              cardBorder:
+                                  _cardBorder((it['age'] as int?) ?? 0),
+                              badgeBg: _badgeBg((it['age'] as int?) ?? 0),
+                              badgeFg: _badgeFg((it['age'] as int?) ?? 0),
                             ),
                           );
                         },
@@ -345,14 +344,14 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
   }
 
   Widget _deleteBg(Color bg, Color fg) => Container(
-    alignment: Alignment.centerRight,
-    padding: const EdgeInsets.symmetric(horizontal: 20),
-    decoration: BoxDecoration(
-      color: bg,
-      borderRadius: BorderRadius.circular(16),
-    ),
-    child: Icon(Icons.delete_rounded, color: fg),
-  );
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Icon(Icons.delete_rounded, color: fg),
+      );
 }
 
 // ===== Sticky header สำหรับ Wrap =====
@@ -412,7 +411,7 @@ class _ColoredChoiceChip extends StatelessWidget {
   }
 }
 
-// ===== การ์ดแบบ Grid (โทนสด) =====
+// ===== การ์ดแบบ Grid (แก้ล้นแนวตั้ง) =====
 class _GridProfileCard extends StatelessWidget {
   const _GridProfileCard({
     required this.name,
@@ -466,7 +465,7 @@ class _GridProfileCard extends StatelessWidget {
             border: Border.all(color: cardBorder),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.05), // ✅ ชัดขึ้นนิด
+                color: Colors.black.withOpacity(0.05),
                 blurRadius: 10,
                 offset: const Offset(0, 4),
               ),
@@ -474,94 +473,115 @@ class _GridProfileCard extends StatelessWidget {
           ),
           child: Padding(
             padding: const EdgeInsets.all(12),
-            child: Column(
-              children: [
-                Container(
-                  width: 68,
-                  height: 68,
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: avatarGradient,
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                    ),
-                    borderRadius: BorderRadius.circular(18),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    initials,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w900,
-                      color: Colors.white, // ✅ ตัดกับไล่เฉดสด
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w800,
-                    color: const Color(0xFF1E2554),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                _AgeBadge(age: age, bg: badgeBg, fg: badgeFg),
-                const Spacer(),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            child: LayoutBuilder(
+              builder: (context, c) {
+                final h = c.maxHeight;
+                // ขนาด avatar ปรับตามความสูงการ์ด เพื่อไม่ให้ล้น
+                final avatar = h.clamp(140.0, 190.0) * 0.36; // ~50–68px
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    IconButton.filledTonal(
-                      tooltip: 'ประวัติ',
-                      onPressed: onHistory,
-                      icon: const Icon(Icons.timeline_rounded),
-                      style: IconButton.styleFrom(
-                        backgroundColor: const Color(0xFFEFF7FF),
-                        foregroundColor: const Color(0xFF0056B3),
+                    // Avatar
+                    Container(
+                      width: avatar,
+                      height: avatar,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: avatarGradient,
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(
+                        initials,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w900,
+                          color: Colors.white,
+                        ),
                       ),
                     ),
-                    PopupMenuButton<String>(
-                      tooltip: 'เพิ่มเติม',
-                      onSelected: (v) {
-                        if (v == 'open') onOpen();
-                        if (v == 'edit') onEdit();
-                        if (v == 'delete') onDelete();
-                      },
-                      itemBuilder: (_) => [
-                        const PopupMenuItem(
-                          value: 'open',
-                          child: ListTile(
-                            dense: true,
-                            leading: Icon(Icons.play_arrow_rounded),
-                            title: Text('เริ่มเลือกเทมเพลต'),
+
+                    const SizedBox(height: 10),
+
+                    // ชื่อ (1 บรรทัด, ellipsis)
+                    Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                        color: const Color(0xFF1E2554),
+                      ),
+                    ),
+
+                    const SizedBox(height: 4),
+
+                    // ป้ายอายุ (เตี้ยลงเล็กน้อย)
+                    _AgeBadge(age: age, bg: badgeBg, fg: badgeFg),
+
+                    // ใช้ SizedBox แทน Spacer() เพื่อตัดปัญหาล้น
+                    const SizedBox(height: 8),
+
+                    // แถวปุ่มล่าง
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        IconButton.filledTonal(
+                          tooltip: 'ประวัติ',
+                          onPressed: onHistory,
+                          icon: const Icon(Icons.timeline_rounded),
+                          style: IconButton.styleFrom(
+                            backgroundColor: const Color(0xFFEFF7FF),
+                            foregroundColor: const Color(0xFF0056B3),
                           ),
                         ),
-                        const PopupMenuItem(
-                          value: 'edit',
-                          child: ListTile(
-                            dense: true,
-                            leading: Icon(Icons.edit_rounded),
-                            title: Text('แก้ไขโปรไฟล์'),
-                          ),
-                        ),
-                        const PopupMenuDivider(),
-                        PopupMenuItem(
-                          value: 'delete',
-                          child: ListTile(
-                            dense: true,
-                            iconColor: Theme.of(context).colorScheme.error,
-                            textColor: Theme.of(context).colorScheme.error,
-                            leading: const Icon(Icons.delete_outline_rounded),
-                            title: const Text('ลบโปรไฟล์'),
-                          ),
+                        PopupMenuButton<String>(
+                          tooltip: 'เพิ่มเติม',
+                          onSelected: (v) {
+                            if (v == 'open') onOpen();
+                            if (v == 'edit') onEdit();
+                            if (v == 'delete') onDelete();
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'open',
+                              child: ListTile(
+                                dense: true,
+                                leading: Icon(Icons.play_arrow_rounded),
+                                title: Text('เริ่มเลือกเทมเพลต'),
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: 'edit',
+                              child: ListTile(
+                                dense: true,
+                                leading: Icon(Icons.edit_rounded),
+                                title: Text('แก้ไขโปรไฟล์'),
+                              ),
+                            ),
+                            const PopupMenuDivider(),
+                            PopupMenuItem(
+                              value: 'delete',
+                              child: ListTile(
+                                dense: true,
+                                iconColor: Theme.of(context).colorScheme.error,
+                                textColor: Theme.of(context).colorScheme.error,
+                                leading:
+                                    const Icon(Icons.delete_outline_rounded),
+                                title: const Text('ลบโปรไฟล์'),
+                              ),
+                            ),
+                          ],
+                          child: const Icon(Icons.more_vert_rounded),
                         ),
                       ],
-                      child: const Icon(Icons.more_vert_rounded),
                     ),
                   ],
-                ),
-              ],
+                );
+              },
             ),
           ),
         ),
@@ -587,9 +607,9 @@ class _AgeBadge extends StatelessWidget {
       child: Text(
         'อายุ $age ขวบ',
         style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          fontWeight: FontWeight.w700,
-          color: fg,
-        ),
+              fontWeight: FontWeight.w700,
+              color: fg,
+            ),
       ),
     );
   }
@@ -608,11 +628,8 @@ class _EmptyState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              Icons.family_restroom_rounded,
-              size: 72,
-              color: theme.hintColor,
-            ),
+            Icon(Icons.family_restroom_rounded,
+                size: 72, color: theme.hintColor),
             const SizedBox(height: 12),
             Text('ยังไม่มีโปรไฟล์เด็ก', style: theme.textTheme.titleMedium),
             const SizedBox(height: 6),
@@ -634,10 +651,11 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-/// ===== BottomSheet (เวอร์ชันสวยขึ้น โทนสดชื่น) =====
+/// ===== BottomSheet: สร้าง/แก้ไขโปรไฟล์ =====
 class _ProfileEditor extends StatefulWidget {
   const _ProfileEditor({this.initial});
   final Map<String, dynamic>? initial;
+
   @override
   State<_ProfileEditor> createState() => _ProfileEditorState();
 }
@@ -701,18 +719,16 @@ class _ProfileEditorState extends State<_ProfileEditor> {
                   ),
                   // title
                   Text(
-                    widget.initial == null
-                        ? 'สร้างโปรไฟล์ใหม่'
-                        : 'แก้ไขโปรไฟล์',
+                    widget.initial == null ? 'สร้างโปรไฟล์ใหม่' : 'แก้ไขโปรไฟล์',
                     style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: .2,
-                    ),
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: .2,
+                        ),
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 14),
 
-                  // name field (filled + chip icon)
+                  // name field
                   TextFormField(
                     controller: _nameCtrl,
                     autofocus: true,
@@ -748,8 +764,9 @@ class _ProfileEditorState extends State<_ProfileEditor> {
                       ),
                     ),
                     validator: (v) {
-                      if (v == null || v.trim().isEmpty)
+                      if (v == null || v.trim().isEmpty) {
                         return 'กรอกชื่อก่อนนะ';
+                      }
                       if (v.trim().length < 2) return 'ชื่อสั้นไปนิด';
                       return null;
                     },
@@ -784,9 +801,8 @@ class _ProfileEditorState extends State<_ProfileEditor> {
                         selectedColor: const Color(0xFFEDE4FF),
                         side: const BorderSide(color: Color(0xFFB3E0FF)),
                         labelStyle: TextStyle(
-                          fontWeight: _age == 4
-                              ? FontWeight.w700
-                              : FontWeight.w500,
+                          fontWeight:
+                              _age == 4 ? FontWeight.w700 : FontWeight.w500,
                           color: _age == 4
                               ? const Color(0xFF0B3D91)
                               : cs.onSurface,
@@ -806,9 +822,8 @@ class _ProfileEditorState extends State<_ProfileEditor> {
                         selectedColor: const Color(0xFFFFF0E0),
                         side: const BorderSide(color: Color(0xFFB3E0FF)),
                         labelStyle: TextStyle(
-                          fontWeight: _age == 5
-                              ? FontWeight.w700
-                              : FontWeight.w500,
+                          fontWeight:
+                              _age == 5 ? FontWeight.w700 : FontWeight.w500,
                           color: _age == 5
                               ? const Color(0xFF0B3D91)
                               : cs.onSurface,
@@ -856,13 +871,14 @@ class _ProfileEditorState extends State<_ProfileEditor> {
   }
 }
 
-/// ปุ่มแคปซูลไล่สี (ม่วง→ฟ้า สดชื่น)
+/// ปุ่มแคปซูลไล่สี (ม่วง→ฟ้า)
 class _GradientButton extends StatelessWidget {
   const _GradientButton({
     required this.onPressed,
     required this.icon,
     required this.label,
   });
+
   final VoidCallback onPressed;
   final IconData icon;
   final String label;
@@ -870,12 +886,10 @@ class _GradientButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      shape: const StadiumBorder(), // ✅ ถูกชนิด
+      shape: const StadiumBorder(),
       child: InkWell(
         onTap: onPressed,
-        borderRadius: BorderRadius.circular(
-          50,
-        ), // ✅ ใช้สำหรับ InkWell แยกกันได้
+        borderRadius: BorderRadius.circular(50),
         child: Ink(
           padding: const EdgeInsets.symmetric(vertical: 14),
           decoration: const BoxDecoration(

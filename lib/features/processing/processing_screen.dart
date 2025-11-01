@@ -1,15 +1,18 @@
 // lib/features/processing/processing_screen.dart
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:image_picker/image_picker.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
-// image package สำหรับ preprocess/แปลง bytes
+// ใช้ package:image สำหรับ preprocess/แปลง bytes (แบบ 1)
 import 'package:image/image.dart' as img;
 import '../../services/image/warp_crop.dart';
 
+// Z-score / Metrics / Masks (เหมือนเดิม ไม่แก้ที่ไฟล์อื่น)
 import '../../services/metrics/zscore_service.dart';
 import '../../services/metrics/masks_cv.dart'
     show shrinkInsideForSafeCount, ensureWhiteIsInside;
@@ -19,7 +22,7 @@ import '../../services/metrics/cotl_cv.dart';
 import '../../services/metrics/entropy_cv.dart';
 import '../../services/metrics/complexity_cv.dart';
 
-// ⬇️ AI segmentation (มี guard เมื่อไม่มีโมเดล)
+// AI segmentation (มี guard เมื่อไม่มีโมเดล) — แบบ 1
 import '../../services/ai/paintseg_infer.dart';
 
 // ประวัติ
@@ -38,8 +41,8 @@ class ProcessingScreen extends StatefulWidget {
 
   final Uint8List? imageBytes;
   final String? imageAssetPath;
-  final String maskAssetPath;
-  final String? templateName;
+  final String maskAssetPath; // e.g. assets/masks/fish_mask.png (ขาว=ด้านใน)
+  final String? templateName; // label แสดงผล
   final String? imageName;
 
   @override
@@ -47,40 +50,59 @@ class ProcessingScreen extends StatefulWidget {
 }
 
 class _ProcessingScreenState extends State<ProcessingScreen> {
+  // ======= Tunables (รวมของทั้งสองแบบ) =======
+  static const int _DX = 2, _DY = 2; // ขนาดหน้าต่าง Bandt–Pompe (ถ้า lib รองรับ)
+  static const int _SHRINK_EXTRA = 22; // ระยะเพิ่มจากขอบสำหรับ safe mask
+  static const double _EDGE_RATIO_EPS = 0.0005; // <0.05% เส้นขอบ ถือว่าเงียบมาก
+  static const double _BLANK_ONE_EPS = 0.01;  // เหลือว่าง >= 99.9% → ปัดเป็น 1.0
+
+
+  // ---- Zero-guard tunables ----
+  static const int _HC_EXTRA_MARGIN_PX = 20; // ขยับลึกเข้าไปอีกสำหรับ H/C
+  // หมายเหตุ: ไม่ใช้ std(gray) แล้ว แต่คงค่าเดิมไว้เผื่อ debug/ปรับภายหลัง
+  static const double _STD_GRAY_EPS = 1.8;
+  static const int _SAT_MIN_COLORED = 26; // S ต่ำกว่า → ไม่ถือว่า "สีจริง"
+  static const int _V_NEARWHITE = 240; // Gray >= นี้ → ใกล้ขาว
+  static const double _COLORED_RATIO_EPS = 0.002; // <0.2% สี → ยังไม่ระบาย
+
   String? _error;
 
+  // preview
   Uint8List? _previewBytes;
   int? _imgW, _imgH;
 
+  // metrics (raw)
   double? _blank, _cotl, _entropy, _complexity;
 
+  // Index (raw) + ระดับ
   double? _indexRaw;
   String? _level;
 
+  // ช่วงอ้างอิงของ Index(raw)
   double? _lowCut, _highCut, _mu, _sigma;
 
-  late String _classKey;
-  late int _age;
-  String _profileKey = '';
+  // profile/template
+  late String _classKey; // 'Fish' | 'Pencil' | 'IceCream'
+  late int _age; // 4 หรือ 5
+  String _profileKey = ''; // owner ของประวัติ
 
   bool _started = false;
   late Future<void> _svcWarmup;
 
-  // ===== AI segmentation =====
+  // ===== AI segmentation (แบบ 1) =====
   late Future<void> _aiWarmup;
-  bool _useAiMask = false; // toggle by user
-  bool _aiMaskUsed = false; // actually used after success
+  bool _useAiMask = false; // toggle โดยผู้ใช้
+  bool _aiMaskUsed = false; // ใช้งานจริงหลังสำเร็จ
 
   @override
   void initState() {
     super.initState();
     _svcWarmup = ZScoreService.instance.ensureLoaded();
-    _aiWarmup = PaintSeg.instance
-        .ensureLoaded(); // set available=true เมื่อมีไฟล์
+    _aiWarmup = PaintSeg.instance.ensureLoaded(); // set available=true เมื่อมีไฟล์
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_started) return;
       _started = true;
-      _run();
+      _run(); // เริ่มประมวลผลครั้งแรก
     });
   }
 
@@ -106,9 +128,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     final dynamic ageRaw = profile?['age'];
     _age = (ageRaw is int) ? ageRaw : int.tryParse('${ageRaw ?? '0'}') ?? 0;
 
-    debugPrint(
-      '>> args -> classKey=$_classKey age=$_age profileKey=$_profileKey',
-    );
+    debugPrint('>> args -> classKey=$_classKey age=$_age profileKey=$_profileKey');
   }
 
   // ---------- Helpers ----------
@@ -133,19 +153,17 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   }
 
   String _templateLabelFromKey(String key) => switch (key) {
-    'Fish' => 'ปลา',
-    'Pencil' => 'ดินสอ',
-    'IceCream' => 'ไอศกรีม',
-    _ => key,
-  };
+        'Fish' => 'ปลา',
+        'Pencil' => 'ดินสอ',
+        'IceCream' => 'ไอศกรีม',
+        _ => key,
+      };
 
   Future<cv.Mat> _decodeBgr(Uint8List bytes) async =>
       cv.imdecode(bytes, cv.IMREAD_COLOR);
 
-  Uint8List _matToPng(cv.Mat m) {
-    final enc = cv.imencode('.png', m);
-    return Uint8List.fromList(enc.$2.toList());
-  }
+  Uint8List _matToPng(cv.Mat m) =>
+      Uint8List.fromList(cv.imencode('.png', m).$2.toList());
 
   Future<Uint8List> _loadAssetBytes(String path) async {
     final b = await rootBundle.load(path);
@@ -157,8 +175,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     try {
       return cv.extractChannel(hsv, 1);
     } catch (_) {
-      final c = cv.split(hsv);
-      return c[1];
+      return cv.split(hsv)[1];
     }
   }
 
@@ -166,11 +183,10 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     final bytes = await _loadAssetBytes(path);
     cv.Mat m = await _decodeBgr(bytes);
     if (m.channels > 1) m = cv.cvtColor(m, cv.COLOR_BGR2GRAY);
-    final bin = cv.threshold(m, 127.0, 255.0, cv.THRESH_BINARY).$2;
-    return bin;
+    return cv.threshold(m, 127.0, 255.0, cv.THRESH_BINARY).$2;
   }
 
-  // ---------- Preprocess (center-crop + resize + bakeOrientation) ----------
+  // ---------- Preprocess (center-crop + resize + bakeOrientation) — แบบ 1 ----------
   Uint8List _preprocessBytes(Uint8List origin, {int target = 900}) {
     final im = img.decodeImage(origin);
     if (im == null) return origin;
@@ -181,7 +197,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     return Uint8List.fromList(img.encodePng(prepped));
   }
 
-  // แปลง PNG preview -> RGBA bytes ให้ PaintSeg
+  // แปลง PNG preview -> RGBA bytes ให้ PaintSeg (แบบ 1)
   Uint8List _pngToRgba(Uint8List png) {
     final im = img.decodeImage(png);
     if (im == null) return png;
@@ -189,19 +205,18 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     return Uint8List.fromList(rgba);
   }
 
-  // prob-map (0..1) -> mask_out (ขาว=นอก, ดำ=ใน), scale เท่ารูป
+  // prob-map (0..1) -> mask_out (ขาว=นอก, ดำ=ใน), scale เท่ารูป (แบบ 1)
   Future<cv.Mat> _probToMaskOut(
     List<List<double>> prob,
     int outW,
     int outH, {
     double thr = 0.5,
-    bool probIsInside =
-        true, // ถ้า prob แปลว่า "ใน" ให้กลับขั้วตอนสร้าง mask_out
+    bool probIsInside = true, // ถ้า prob หมายถึง "ด้านใน" ให้กลับขั้วเป็น mask_out
   }) async {
     final h = prob.length;
     final w = prob[0].length;
 
-    // ใช้ package:image ทำ 8-bit แล้วค่อย decode เป็น Mat เพื่อเลี่ยง ptr/CV_8U
+    // ใช้ package:image ทำ 8-bit แล้วค่อย decode เป็น Mat
     final canvas = img.Image(width: w, height: h);
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
@@ -218,6 +233,101 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     return cv.threshold(resized, 127.0, 255.0, cv.THRESH_BINARY).$2;
   }
 
+  /// safe mask ด้วย distanceTransform (แบบ 2)
+  cv.Mat _allInsideMask(cv.Mat inside,
+      {int dx = _DX, int dy = _DY, int extraPx = _SHRINK_EXTRA}) {
+    final pair =
+        cv.distanceTransform(inside, cv.DIST_L2, 3, cv.DIST_LABEL_PIXEL);
+    final dist = pair.$1;
+    final need = math.max(extraPx, math.max(dx, dy)).toDouble();
+    final safe = cv.threshold(dist, need, 255.0, cv.THRESH_BINARY).$2;
+    return cv.convertScaleAbs(safe);
+  }
+
+  /// สร้างพื้นที่ปลอดภัยพิเศษสำหรับคำนวณ H/C (ลึกกว่า insideSafe อีกนิด)
+  cv.Mat _makeInsideForHC(cv.Mat insideSafe) {
+    final deeper = _allInsideMask(
+      insideSafe,
+      dx: _DX,
+      dy: _DY,
+      extraPx: _SHRINK_EXTRA + _HC_EXTRA_MARGIN_PX,
+    );
+    return deeper;
+  } 
+  /// สร้าง edge mask แบบ simple ด้วย morphological gradient (dilate - erode)
+  cv.Mat _edgeMaskSimple(cv.Mat gray, cv.Mat insideMask) {
+    // kernel สี่เหลี่ยม 3x3
+    final kernel = cv.getStructuringElement(cv.MORPH_RECT, (3, 3));
+
+    // gradient = dilate - erode
+    final dil = cv.dilate(gray, kernel, iterations: 1);
+    final ero = cv.erode(gray, kernel, iterations: 1);
+    final grad = cv.subtract(dil, ero);
+
+    // threshold เพื่อให้ได้ขอบคมชัด
+    final edges = cv.threshold(grad, 12.0, 255.0, cv.THRESH_BINARY).$2;
+
+    // จำกัดขอบให้อยู่เฉพาะด้านใน template
+    return cv.min(edges, insideMask);
+  }
+
+
+
+
+
+  /// คำนวณ H/C พร้อม "ศูนย์จริง" guard (ไม่ใช้ Gaussian/Sobel/Laplacian)
+  ({double ent, double comp}) _computeEntCompWithZeroGuard({
+    required cv.Mat bgr,
+    required cv.Mat gray,
+    required cv.Mat insideForHC,
+  }) {
+    // denoise เบาๆ ด้วย median (เมธอดนี้มีในแพ็กเกจ)
+    final bgrMed = cv.medianBlur(bgr, 3);
+
+    // 1) คำนวณ Entropy / Complexity ปกติ
+    double ent = EntropyCV.computeNormalized(
+      bgrMed,
+      mask: insideForHC,
+      dx: _DX,
+      dy: _DY,
+    );
+    double comp = ComplexityCV.edgeDensity(
+      bgrMed,
+      mask: insideForHC,
+      dx: _DX,
+      dy: _DY,
+    );
+
+    // 2) วัด "edge ratio" ด้วย morphological gradient (แทน Sobel/Canny)
+    final edgesInside = _edgeMaskSimple(gray, insideForHC);
+    final areaInside  = math.max(1, cv.countNonZero(insideForHC));
+    final edgeRatio   = cv.countNonZero(edgesInside) / areaInside;
+
+    // 3) วัด "colored ratio" = พิกเซลที่มีสีจริงและไม่ขาว
+    final hsv = cv.cvtColor(bgrMed, cv.COLOR_BGR2HSV);
+    final sCh = () { try { return cv.extractChannel(hsv, 1); } catch (_) { return cv.split(hsv)[1]; } }();
+    final satHi     = cv.threshold(sCh, _SAT_MIN_COLORED * 1.0, 255.0, cv.THRESH_BINARY).$2;
+    final notWhite  = cv.threshold(gray, _V_NEARWHITE   * 1.0, 255.0, cv.THRESH_BINARY_INV).$2;
+    // opencv_dart ไม่มี bitwiseAnd(mask:...) → ใช้ min() แทน AND
+    final colored        = cv.min(satHi, notWhite);
+    final coloredInside  = cv.min(colored, insideForHC);
+    final coloredRatio   = cv.countNonZero(coloredInside) / areaInside;
+
+    // 4) Zero-Guard: ถ้า “ไม่มีลาย” และ “แทบไม่มีสี” → บังคับ H/C = 0
+    if (edgeRatio < _EDGE_RATIO_EPS && coloredRatio < _COLORED_RATIO_EPS) {
+      ent  = 0.0;
+      comp = 0.0;
+      debugPrint('🧪 ZeroGuard: edgeRatio=${edgeRatio.toStringAsFixed(6)}, '
+                'coloredRatio=${coloredRatio.toStringAsFixed(6)} → H/C=0');
+    } else {
+      debugPrint('ℹ️ H/C kept: edgeRatio=${edgeRatio.toStringAsFixed(6)}, '
+                'coloredRatio=${coloredRatio.toStringAsFixed(6)}');
+    }
+
+    return (ent: ent, comp: comp);
+  }
+
+
   void _snack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
@@ -226,7 +336,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   // ---------- Pipeline ----------
   Future<void> _run({Uint8List? overrideBytes}) async {
     try {
-      // 1) load image
+      // 1) load image (แบบ 1: orientation+crop+resize)
       Uint8List rawBytes;
       if (overrideBytes != null) {
         rawBytes = overrideBytes;
@@ -242,13 +352,13 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         rawBytes = await picked.readAsBytes();
       }
 
-      // 2) preprocess
+      // 2) preprocess → preview PNG
       final preBytes = _preprocessBytes(rawBytes, target: 900);
       _previewBytes = preBytes;
       cv.Mat bgr = await _decodeBgr(preBytes);
 
-      // 3) prepare masks (AI first if available+enabled)
-      await _aiWarmup; // เผื่อโหลดช้า
+      // 3) prepare masks (AI ถ้าเปิดและ available)
+      await _aiWarmup;
       cv.Mat? maskOutAi;
       _aiMaskUsed = false;
 
@@ -259,7 +369,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
           try {
             final rgba = _pngToRgba(_previewBytes!);
             final prob = PaintSeg.instance.run(rgba, _imgW!, _imgH!);
-            // สมมติ prob = ความน่าจะเป็น "พื้นที่ใน" → กลับขั้วให้เป็น mask_out
+            // prob = inside → กลับขั้วเป็น mask_out
             maskOutAi = await _probToMaskOut(
               prob,
               bgr.cols,
@@ -276,60 +386,95 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         }
       }
 
-      // 4) เลือก inside masks
-      cv.Mat insideSafe;
-      cv.Mat insideForCotlSafe;
+      // 4) สร้าง masks แยกตามงาน
+      late cv.Mat insideForBlank;
+      late cv.Mat insideForCotl;
+      late cv.Mat insideForHC;
 
       if (maskOutAi != null) {
-        // จาก AI: mask_out ขาว=นอก → inside = NOT(mask_out)
+        // AI → mask_out (ขาว=นอก) → inside
         final insideFromAi = cv.bitwiseNOT(maskOutAi);
-        insideSafe = shrinkInsideForSafeCount(
-          ensureWhiteIsInside(insideFromAi),
-          px: 1,
-        );
-        insideForCotlSafe = insideSafe;
+        final insideEnsured = ensureWhiteIsInside(insideFromAi);
+        final resized = insideEnsured; // AI ออกมาก็เท่ารูปแล้ว
+
+        // ⬇️ แยกใช้
+        insideForBlank = shrinkInsideForSafeCount(resized, px: 1);      // บางเหมือนเดิม
+        insideForCotl  = shrinkInsideForSafeCount(resized, px: 1);
+        insideForHC    = _makeInsideForHC(resized);                     // หนาเฉพาะ H/C
       } else {
-        // จาก asset เดิม
+        // จาก asset ปกติ: _mask.png (ขาว=ด้านใน)
         final maskInRaw = await _loadBinaryMask(widget.maskAssetPath);
         final insideRaw = ensureWhiteIsInside(maskInRaw);
-        final inside = cv.resize(insideRaw, (
-          bgr.cols,
-          bgr.rows,
-        ), interpolation: cv.INTER_NEAREST);
-        insideSafe = shrinkInsideForSafeCount(inside, px: 1);
+        final inside = cv.resize(insideRaw, (bgr.cols, bgr.rows), interpolation: cv.INTER_NEAREST);
 
+        // ⬇️ แยกใช้
+        insideForBlank = shrinkInsideForSafeCount(inside, px: 1);       // ❗ ไม่ผ่าน _allInsideMask
+        // COTL: พยายามใช้ _mask_out ถ้ามี
         final maskOutPath = widget.maskAssetPath
             .replaceAll('assets/masks/', 'assets/masks_out/')
             .replaceAll('_mask', '_mask_out');
-
         try {
-          final maskOutRaw = await _loadBinaryMask(maskOutPath);
+          final maskOutRaw = await _loadBinaryMask(maskOutPath);        // ขาว=นอก
           final insideFromOut = ensureWhiteIsInside(cv.bitwiseNOT(maskOutRaw));
-          final insideFromOutResized = cv.resize(insideFromOut, (
-            bgr.cols,
-            bgr.rows,
-          ), interpolation: cv.INTER_NEAREST);
-          insideForCotlSafe = shrinkInsideForSafeCount(
-            insideFromOutResized,
-            px: 1,
-          );
+          insideForCotl = cv.resize(insideFromOut, (bgr.cols, bgr.rows), interpolation: cv.INTER_NEAREST);
+          insideForCotl = shrinkInsideForSafeCount(insideForCotl, px: 1);
         } catch (_) {
-          insideForCotlSafe = insideSafe;
+          insideForCotl = insideForBlank;
         }
+
+        insideForHC = _makeInsideForHC(inside);                         // หนาเฉพาะ H/C
       }
+
 
       // 5) channels
       final gray = cv.cvtColor(bgr, cv.COLOR_BGR2GRAY);
-      final sat = _extractS(bgr);
+      final sat  = _extractS(bgr);
 
-      // 6) metrics
-      final blank = await computeBlank(gray, sat, insideSafe);
-      final ent = EntropyCV.computeNormalized(bgr, mask: insideSafe);
-      final comp = ComplexityCV.edgeDensity(bgr, mask: insideSafe);
-      final cotl = await computeCotl(
+      // 6) metrics — ใช้ mask แยกตามงาน
+      double blank = await computeBlank(gray, sat, insideForBlank);
+      final double cotl  = await computeCotl(
         gray,
         sat,
-        cv.bitwiseNOT(insideForCotlSafe), // คาดหวัง mask_out
+        cv.bitwiseNOT(insideForCotl), // ส่ง mask_out ให้ COTL
+      );
+
+      // ถ้ารูป "ว่างเกือบทั้งหมด" ให้ปัดเป็น 1.0 เพื่อได้ 1.0000 เป๊ะ
+      if ((1.0 - blank) < _BLANK_ONE_EPS) {
+        blank = 1.0;
+      }
+
+
+      // ===== DEBUG: แสดงขนาดพื้นที่ของแต่ละ mask + ค่า blank คร่าว ๆ =====
+      debugPrint(
+        '🟣 RUN_METRICS v3 — areas: '
+        'blank=${cv.countNonZero(insideForBlank)}, '
+        'cotl=${cv.countNonZero(insideForCotl)}, '
+        'hc=${cv.countNonZero(insideForHC)} | '
+        'blank≈${blank.toStringAsFixed(4)}'
+      );
+
+      // คำนวณ H/C ด้วย Zero-Guard (ใช้เฉพาะ insideForHC)
+      final hc = _computeEntCompWithZeroGuard(
+        bgr: bgr,
+        gray: gray,
+        insideForHC: insideForHC,
+      );
+      double ent  = hc.ent;
+      double comp = hc.comp;
+
+      // เงื่อนไขอัดเป็นศูนย์แบบเสริม (เพื่อภาพที่ยังไม่ระบายจริง ๆ)
+      if (blank > 0.985 && (cotl == 0.0 || cotl.abs() < 1e-6)) {
+        debugPrint('✅ ForceZero: blank>0.985 && cotl≈0 → H/C=0');
+        ent  = 0.0;
+        comp = 0.0;
+      }
+
+      // ===== DEBUG: สรุปค่าออกปลายทาง =====
+      debugPrint(
+        '📊 FINAL  H=${ent.toStringAsFixed(6)} '
+        'C=${comp.toStringAsFixed(6)}  '
+        'Blank=${blank.toStringAsFixed(6)}  '
+        'COTL=${cotl.toStringAsFixed(6)}'
       );
 
       // 7) index & z
@@ -353,7 +498,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 
       // 8) save history
       try {
-        final Uint8List pngBytes = _previewBytes ?? preBytes;
+        final Uint8List pngBytes = _previewBytes ?? _matToPng(bgr);
         String imagePath = '';
         if (_profileKey.isNotEmpty) {
           imagePath = await HistoryRepo.I.saveImageBytes(
@@ -389,6 +534,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 
       if (!mounted) return;
       setState(() {
+        _previewBytes = _previewBytes; // already set
         _blank = blank;
         _cotl = cotl;
         _entropy = ent;
@@ -403,6 +549,8 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         _sigma = raw.sigma;
 
         _error = null;
+        _imgW = _imgW;
+        _imgH = _imgH;
       });
     } catch (e) {
       if (!mounted) return;
@@ -411,7 +559,6 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   }
 
   // ===== UI helpers =====
-
   Future<ImageSource?> _askImageSource() async {
     if (!mounted) return null;
     final cs = Theme.of(context).colorScheme;
@@ -462,7 +609,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     );
   }
 
-  // ⭐ ดาว
+  // ⭐ ดาว (คงเมธอดเดิม)
   Widget _buildStarLevel(String? level) {
     if (level == null || level.trim().isEmpty) {
       return Row(
@@ -495,8 +642,6 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       stars = 1;
     } else if (low) {
       stars = 2;
-    } else if (normal) {
-      stars = 3;
     }
 
     final gradient = const LinearGradient(
@@ -519,12 +664,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
               size: 32,
               color: filled ? Colors.amber : Colors.grey.shade400,
               shadows: filled
-                  ? [
-                      Shadow(
-                        color: Colors.amber.withOpacity(0.6),
-                        blurRadius: 8,
-                      ),
-                    ]
+                  ? [Shadow(color: Colors.amber.withOpacity(0.6), blurRadius: 8)]
                   : [],
             ),
           ),
@@ -533,6 +673,47 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     );
   }
 
+  // เปิดดูรูปเต็มจอ
+  void _openFullImage() {
+    if (_previewBytes == null) return;
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.85),
+      builder: (_) => Dialog(
+        insetPadding: const EdgeInsets.all(12),
+        backgroundColor: Colors.black,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: InteractiveViewer(
+            minScale: 0.7,
+            maxScale: 5,
+            child: Image.memory(_previewBytes!, fit: BoxFit.contain),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // เลือกรูปใหม่แล้วประมวลผลต่อทันที
+  Future<void> _changeImage() async {
+    final src = await _askImageSource();
+    if (src == null) return;
+    final XFile? picked = await ImagePicker().pickImage(source: src);
+    if (picked == null) return;
+    setState(() {
+      _previewBytes = null;
+      _blank = _cotl = _entropy = _complexity = null;
+      _indexRaw = null;
+      _level = null;
+      _lowCut = _highCut = _mu = _sigma = null;
+      _error = null;
+    });
+    final bytes = await picked.readAsBytes();
+    await _run(overrideBytes: bytes);
+  }
+
+  // ---------- UI ----------
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -554,10 +735,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     }
 
     final waiting =
-        _blank == null ||
-        _cotl == null ||
-        _entropy == null ||
-        _complexity == null;
+        _blank == null || _cotl == null || _entropy == null || _complexity == null;
 
     if (waiting) {
       return Scaffold(
@@ -587,32 +765,32 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
                   '${_imgW != null && _imgH != null ? ' • ${_imgW}×${_imgH}px' : ''}'
                   '${_aiMaskUsed ? ' • AI mask' : ''}',
               onZoom: _openFullImage,
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('ใช้ AI mask'),
-                  const SizedBox(width: 6),
-                  Switch(
-                    value: _useAiMask && PaintSeg.instance.available,
-                    onChanged: (v) async {
-                      if (v && !PaintSeg.instance.available) {
-                        _snack('ยังไม่มีโมเดล AI');
-                        return;
-                      }
-                      setState(() => _useAiMask = v);
-                      // re-run
-                      setState(() {
-                        _blank = _cotl = _entropy = _complexity = null;
-                        _indexRaw = null;
-                        _level = null;
-                        _lowCut = _highCut = _mu = _sigma = null;
-                        _error = null;
-                      });
-                      await _run(overrideBytes: _previewBytes!);
-                    },
-                  ),
-                ],
-              ),
+              // trailing: Row(
+              //   mainAxisSize: MainAxisSize.min,
+              //   children: [
+              //     const Text('ใช้ AI mask'),
+              //     const SizedBox(width: 6),
+              //     Switch(
+              //       value: _useAiMask && PaintSeg.instance.available,
+              //       onChanged: (v) async {
+              //         if (v && !PaintSeg.instance.available) {
+              //           _snack('ยังไม่มีโมเดล AI');
+              //           return;
+              //         }
+              //         setState(() => _useAiMask = v);
+              //         // re-run
+              //         setState(() {
+              //           _blank = _cotl = _entropy = _complexity = null;
+              //           _indexRaw = null;
+              //           _level = null;
+              //           _lowCut = _highCut = _mu = _sigma = null;
+              //           _error = null;
+              //         });
+              //         await _run(overrideBytes: _previewBytes!);
+              //       },
+              //     ),
+              //   ],
+              // ),
             ),
             const SizedBox(height: 10),
             Row(
@@ -717,62 +895,20 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     );
   }
 
-  Widget _metricRow(String label, double value) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
-      margin: const EdgeInsets.only(bottom: 10),
-      decoration: BoxDecoration(
-        color: Colors.black12.withOpacity(0.05),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: [
-          Expanded(child: Text(label)),
-          Text(value.toStringAsFixed(4)),
-        ],
-      ),
-    );
-  }
-
-  // เปิดดูรูปเต็มจอ
-  void _openFullImage() {
-    if (_previewBytes == null) return;
-    showDialog(
-      context: context,
-      barrierColor: Colors.black.withOpacity(0.85),
-      builder: (_) => Dialog(
-        insetPadding: const EdgeInsets.all(12),
-        backgroundColor: Colors.black,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(16),
-          child: InteractiveViewer(
-            minScale: 0.7,
-            maxScale: 5,
-            child: Image.memory(_previewBytes!, fit: BoxFit.contain),
-          ),
+  Widget _metricRow(String label, double value) => Container(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+        margin: const EdgeInsets.only(bottom: 10),
+        decoration: BoxDecoration(
+          color: Colors.black12.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(12),
         ),
-      ),
-    );
-  }
-
-  // เลือกรูปใหม่แล้วประมวลผลต่อทันที
-  Future<void> _changeImage() async {
-    final src = await _askImageSource();
-    if (src == null) return;
-    final XFile? picked = await ImagePicker().pickImage(source: src);
-    if (picked == null) return;
-    setState(() {
-      _previewBytes = null;
-      _blank = _cotl = _entropy = _complexity = null;
-      _indexRaw = null;
-      _level = null;
-      _lowCut = _highCut = _mu = _sigma = null;
-      _error = null;
-    });
-    final bytes = await picked.readAsBytes();
-    await _run(overrideBytes: bytes);
-  }
+        child: Row(
+          children: [
+            Expanded(child: Text(label)),
+            Text(value.toStringAsFixed(4)),
+          ],
+        ),
+      );
 }
 
 // ===== ปุ่มการ์ดใน bottom sheet =====
@@ -794,13 +930,13 @@ class _SheetActionButton extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
 
     final bgColor = filled ? cs.primaryContainer.withOpacity(0.35) : cs.surface;
-    final borderColor = filled
-        ? cs.primary.withOpacity(0.35)
-        : cs.outlineVariant;
+    final borderColor =
+        filled ? cs.primary.withOpacity(0.35) : cs.outlineVariant;
     final iconColor = filled ? cs.primary : cs.onSurfaceVariant;
-    final textStyle = Theme.of(
-      context,
-    ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800);
+    final textStyle = Theme.of(context)
+        .textTheme
+        .titleMedium
+        ?.copyWith(fontWeight: FontWeight.w800);
 
     return InkWell(
       onTap: onTap,
@@ -836,7 +972,7 @@ class _SheetActionButton extends StatelessWidget {
   }
 }
 
-// ===== การ์ดพรีวิวรูป (เพิ่มสวิตช์ AI mask) =====
+// ===== การ์ดพรีวิวรูป (มีสวิตช์ AI mask ที่มุมขวาล่าง) =====
 class _PreviewCard extends StatelessWidget {
   const _PreviewCard({
     required this.bytes,
@@ -905,8 +1041,7 @@ class _PreviewCard extends StatelessWidget {
               ),
             ),
           ),
-          if (trailing != null)
-            Positioned(right: 10, bottom: 10, child: trailing!),
+          if (trailing != null) Positioned(right: 10, bottom: 10, child: trailing!),
           Positioned(
             right: 8,
             top: 8,

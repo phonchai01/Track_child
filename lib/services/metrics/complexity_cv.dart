@@ -48,9 +48,9 @@ class ComplexityCV {
       return 0.0;
     }
 
-    final d = _jsDivToUniform(p);
+    final d  = _jsDivToUniform(p);
     final ds = _dStar(p.length);
-    final c = (ds > 0) ? (d * hn / ds) : 0.0;
+    final c  = (ds > 0) ? (d * hn / ds) : 0.0;
     final out = (c < 1e-9) ? 0.0 : c.clamp(0.0, 1.0);
     print('📊 ComplexityCV: Hn=$hn  D=$d  D*=$ds  C=$out');
     return out;
@@ -65,12 +65,7 @@ class ComplexityCV {
     double? zeroFloorH,
   }) {
     return edgeDensity(
-      bgr,
-      mask: mask,
-      dx: dx,
-      dy: dy,
-      bleedFixPx: bleedFixPx,
-      zeroFloorH: zeroFloorH,
+      bgr, mask: mask, dx: dx, dy: dy, bleedFixPx: bleedFixPx, zeroFloorH: zeroFloorH,
     );
   }
 }
@@ -83,12 +78,10 @@ cv.Mat _prepareBinaryMask(
   required int dy,
   int? bleedFixPx,
 }) {
-  final mGray = (mask.channels > 1)
-      ? cv.cvtColor(mask, cv.COLOR_BGR2GRAY)
-      : mask.clone();
-  final mBin = cv
-      .threshold(mGray, 0.0, 255.0, cv.THRESH_BINARY | cv.THRESH_OTSU)
-      .$2;
+  final mGray =
+      (mask.channels > 1) ? cv.cvtColor(mask, cv.COLOR_BGR2GRAY) : mask.clone();
+  final mBin =
+      cv.threshold(mGray, 0.0, 255.0, cv.THRESH_BINARY | cv.THRESH_OTSU).$2;
 
   // ดีฟอลต์หดอย่างน้อย 2px กันหน้าต่าง 2×2 ชนขอบเส้น
   final k = (bleedFixPx ?? math.max(2, math.max(dx, dy) - 1)).clamp(0, 32);
@@ -139,9 +132,8 @@ _GrayMask _prepareGrayAndMask(cv.Mat bgr, cv.Mat? mask) {
   final r = ch[2].data;
   List<int>? m;
   if (mask != null) {
-    final m1 = (mask.channels > 1)
-        ? cv.cvtColor(mask, cv.COLOR_BGR2GRAY).data
-        : mask.data;
+    final m1 =
+        (mask.channels > 1) ? cv.cvtColor(mask, cv.COLOR_BGR2GRAY).data : mask.data;
     m = List<int>.from(m1);
   }
   return _GrayMask(bgr.cols, bgr.rows, r.toList(), g.toList(), b.toList(), m);
@@ -167,10 +159,7 @@ List<int> _countPermDistribution(
         for (int yy = 0; yy < dy && ok; yy++) {
           final row = (y + yy) * W;
           for (int xx = 0; xx < dx; xx++) {
-            if (gm.mask![row + (x + xx)] == 0) {
-              ok = false;
-              break;
-            }
+            if (gm.mask![row + (x + xx)] == 0) { ok = false; break; }
           }
         }
         if (!ok) continue;
@@ -206,16 +195,12 @@ List<int> _argsortStable(List<double> v) {
 List<List<int>> _allPerms(int m) {
   final res = <List<int>>[];
   void gen(List<int> cur, List<int> left) {
-    if (left.isEmpty) {
-      res.add(List<int>.from(cur));
-      return;
-    }
+    if (left.isEmpty) { res.add(List<int>.from(cur)); return; }
     for (int i = 0; i < left.length; i++) {
       final next = List<int>.from(left)..removeAt(i);
       gen([...cur, left[i]], next);
     }
   }
-
   gen([], List<int>.generate(m, (i) => i));
   return res;
 }
@@ -224,9 +209,7 @@ String _key(List<int> p) => p.join(',');
 
 double _S(Iterable<double> p) {
   double s = 0.0;
-  for (final pi in p) {
-    if (pi > 0) s += pi * math.log(1.0 / pi);
-  }
+  for (final pi in p) { if (pi > 0) s += pi * math.log(1.0 / pi); }
   return s;
 }
 
@@ -250,6 +233,5 @@ double _jsDivToUniform(List<double> p) {
 }
 
 double _dStar(int n) {
-  return -0.5 *
-      (((n + 1) / n) * math.log(n + 1) + math.log(n) - 2 * math.log(2 * n));
+  return -0.5 * (((n + 1) / n) * math.log(n + 1) + math.log(n) - 2 * math.log(2 * n));
 }
