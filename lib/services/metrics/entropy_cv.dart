@@ -1,48 +1,118 @@
-// Permutation Entropy (normalized) for dx×dy windows (default 2×2)
-// API เดิม: EntropyCV.computeNormalized(bgr, {mask})
+// lib/services/metrics/entropy_cv.dart
+//
+// Permutation Entropy (normalized) บนหน้าต่าง dx×dy (ดีฟอลต์ 2×2)
+// คุณสมบัติ:
+//  - ใช้เฉพาะพิกเซลที่อยู่ "ใน mask ทั้งหมด" (all-inside windows)
+//  - safeMask: หด mask อัตโนมัติ ≥2px กันหน้าต่างชนเส้น
+//  - flat-check: บริเวณเนียนมาก => 0
+//  - zero-floor: Hn ≤ 0.03 => 0 (กัน noise จาก AA/การย่อ/บีบอัด)
+
 import 'dart:math' as math;
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
+const double _EPS_FLAT = 1.0; // ยอมต่างเทาเล็กน้อย
+const double _FLAT_OUTLIER_FRAC = 0.002; // ยอม outlier ~0.2%
+const double _H_ZERO_FLOOR = 0.03; // ปัดเป็น 0 ถ้าต่ำกว่านี้
+
 class EntropyCV {
-  /// คืนค่า Hn ∈ [0,1] (Bandt–Pompe) ตาม Python ของคุณ
-  /// - dx,dy ปรับได้ (ค่าเริ่มต้น 2×2 → n = 24 สถานะ)
-  /// - รวมเฉพาะหน้าต่างที่ทุกพิกเซลอยู่ใน mask (all-4-inside)
   static double computeNormalized(
     cv.Mat bgr, {
     cv.Mat? mask,
     int dx = 2,
     int dy = 2,
+    int? bleedFixPx,
+    double? zeroFloorH,
   }) {
-    final _GrayMask gm = _prepareGrayAndMask(bgr, mask);
-    final counts = _countPermDistribution(gm, dx: dx, dy: dy);
+    print('🚀 EntropyCV vNEW called (dx=$dx, dy=$dy) mask?=${mask != null}');
+    final cv.Mat? safeMask = (mask == null)
+        ? null
+        : _prepareBinaryMask(mask, dx: dx, dy: dy, bleedFixPx: bleedFixPx);
 
+    if (safeMask != null) {
+      final m8 = (safeMask.type == 0) ? safeMask : cv.convertScaleAbs(safeMask);
+      print('   └insidePx=${cv.countNonZero(m8)} size=${m8.cols}x${m8.rows}');
+    }
+
+    final _GrayMask gm = _prepareGrayAndMask(bgr, safeMask);
+    if (_isFlatRegion(gm)) return 0.0;
+
+    final counts = _countPermDistribution(gm, dx: dx, dy: dy);
     int total = 0;
     for (final c in counts) total += c;
     if (total == 0) return 0.0;
 
     final p = List<double>.generate(counts.length, (i) => counts[i] / total);
-    return _entropyNormalizedFromP(p).clamp(0.0, 1.0);
+    final hn = _entropyNormalizedFromP(p).clamp(0.0, 1.0);
+
+    final thr = zeroFloorH ?? _H_ZERO_FLOOR;
+    final out = (hn <= thr) ? 0.0 : hn;
+    print('📊 EntropyCV: Hn=$hn (floor=$thr) => $out');
+    return out;
   }
 }
 
-// ----------------------- helpers (self-contained) -----------------------
+// -------- helpers --------
+
+cv.Mat _prepareBinaryMask(
+  cv.Mat mask, {
+  required int dx,
+  required int dy,
+  int? bleedFixPx,
+}) {
+  final mGray = (mask.channels > 1)
+      ? cv.cvtColor(mask, cv.COLOR_BGR2GRAY)
+      : mask.clone();
+  final mBin = cv
+      .threshold(mGray, 0.0, 255.0, cv.THRESH_BINARY | cv.THRESH_OTSU)
+      .$2;
+
+  // ดีฟอลต์: หดอย่างน้อย 2px กันหน้าต่าง 2×2 ชนเส้น
+  final k = (bleedFixPx ?? math.max(2, math.max(dx, dy) - 1)).clamp(0, 32);
+  if (k > 0) {
+    final ker = cv.getStructuringElement(0, (2 * k + 1, 2 * k + 1));
+    return cv.erode(mBin, ker);
+  }
+  return mBin;
+}
 
 class _GrayMask {
   final int w, h;
-  final List<int> r, g, b; // 0..255
-  final List<int>? mask; // null=ไม่มี, มี=0/!=0
+  final List<int> r, g, b;
+  final List<int>? mask;
   _GrayMask(this.w, this.h, this.r, this.g, this.b, this.mask);
-
-  // (R+G+B)/3 ให้เหมือนเวอร์ชัน Python
   double grayAt(int idx) => (r[idx] + g[idx] + b[idx]) / 3.0;
+}
+
+bool _isFlatRegion(_GrayMask gm) {
+  final int W = gm.w, H = gm.h;
+  double? base;
+  int total = 0, outlier = 0;
+
+  if (gm.mask == null) {
+    for (int i = 0, n = W * H; i < n; i++) {
+      final v = gm.grayAt(i);
+      base ??= v;
+      total++;
+      if ((v - base!).abs() > _EPS_FLAT) outlier++;
+    }
+  } else {
+    for (int i = 0, n = W * H; i < n; i++) {
+      if (gm.mask![i] == 0) continue;
+      final v = gm.grayAt(i);
+      base ??= v;
+      total++;
+      if ((v - base!).abs() > _EPS_FLAT) outlier++;
+    }
+  }
+  if (total == 0) return false;
+  return (outlier / total) <= _FLAT_OUTLIER_FRAC;
 }
 
 _GrayMask _prepareGrayAndMask(cv.Mat bgr, cv.Mat? mask) {
   final ch = cv.split(bgr);
-  final b = ch[0].data; // Uint8List
+  final b = ch[0].data;
   final g = ch[1].data;
   final r = ch[2].data;
-
   List<int>? m;
   if (mask != null) {
     final m1 = (mask.channels > 1)
@@ -50,7 +120,6 @@ _GrayMask _prepareGrayAndMask(cv.Mat bgr, cv.Mat? mask) {
         : mask.data;
     m = List<int>.from(m1);
   }
-
   return _GrayMask(bgr.cols, bgr.rows, r.toList(), g.toList(), b.toList(), m);
 }
 
@@ -69,7 +138,6 @@ List<int> _countPermDistribution(
 
   for (int y = 0; y <= H - dy; y++) {
     for (int x = 0; x <= W - dx; x++) {
-      // all-4-inside
       if (gm.mask != null) {
         bool ok = true;
         for (int yy = 0; yy < dy && ok; yy++) {
@@ -83,17 +151,14 @@ List<int> _countPermDistribution(
         }
         if (!ok) continue;
       }
-
       final vals = List<double>.filled(m, 0.0);
       int k = 0;
       for (int yy = 0; yy < dy; yy++) {
         final row = (y + yy) * W;
         for (int xx = 0; xx < dx; xx++) {
-          final idx = row + (x + xx);
-          vals[k++] = gm.grayAt(idx);
+          vals[k++] = gm.grayAt(row + (x + xx));
         }
       }
-
       final ord = _argsortStable(vals);
       counts[indexOf[_key(ord)]!] += 1;
     }
@@ -107,7 +172,7 @@ List<int> _argsortStable(List<double> v) {
     final da = v[a], db = v[b];
     if (da < db) return -1;
     if (da > db) return 1;
-    return a.compareTo(b); // stable
+    return a.compareTo(b);
   });
   return idx;
 }

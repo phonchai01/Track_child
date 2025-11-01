@@ -1,17 +1,28 @@
 import 'package:image/image.dart' as img;
 
-/// สัดส่วนเบื้องต้น: ยังไม่ detect มุมกระดาษจริง
-/// ตอนนี้ทำแค่ crop ตรงกลาง/resize เพื่อให้ flow ไปต่อมาได้
+/// ครอปตรงกลางแบบสี่เหลี่ยมจัตุรัส แล้วรีไซซ์เป็นขนาดเป้าหมาย
 class WarpCrop {
   static img.Image centerCropResize(img.Image src, {int target = 512}) {
-    final side = src.width < src.height ? src.width : src.height;
-    final x0 = (src.width - side) ~/ 2;
-    final y0 = (src.height - side) ~/ 2;
+    // เผื่อกรณีที่รูปมี EXIF orientation
+    final oriented = img.bakeOrientation(src);
 
-    // ✅ copyCrop ใช้ positional arguments
-    final cropped = img.copyCrop(src, x0, y0, side, side);
+    final side = oriented.width < oriented.height
+        ? oriented.width
+        : oriented.height;
 
-    // ✅ resize ให้เป็นขนาดเป้าหมาย
+    final x0 = (oriented.width - side) ~/ 2;
+    final y0 = (oriented.height - side) ~/ 2;
+
+    // ✅ copyCrop ใน v4 ใช้ named parameters
+    final cropped = img.copyCrop(
+      oriented,
+      x: x0,
+      y: y0,
+      width: side,
+      height: side,
+    );
+
+    // ✅ copyResize ใช้ named parameters เช่นกัน
     return img.copyResize(
       cropped,
       width: target,
@@ -20,6 +31,6 @@ class WarpCrop {
     );
   }
 
-  /// ที่หลัง: เพิ่ม corner detection + perspective transform
+  /// stub สำหรับอนาคต: perspective transform
   static img.Image perspectiveStub(img.Image src) => src;
 }

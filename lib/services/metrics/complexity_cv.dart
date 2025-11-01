@@ -1,19 +1,38 @@
-// Statistical Complexity (LMC) จาก permutation distribution (Bandt–Pompe)
-// API เดิม: ComplexityCV.edgeDensity(bgr, {mask})
-//  *แม้ชื่อเมธอดเดิม แต่ความหมายคือ LMC Complexity แล้ว*
+// lib/services/metrics/complexity_cv.dart
+//
+// LMC Statistical Complexity จาก Bandt–Pompe
+// C = (D / D*) * Hn  (D = JS divergence ถึง uniform, Hn = normalized entropy)
+// คุณสมบัติ: all-inside windows, flat-check, zero-floor (อิง Hn), รองรับ dartcv4
+
 import 'dart:math' as math;
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
+const double _EPS_FLAT = 1.0;
+const double _FLAT_OUTLIER_FRAC = 0.002;
+const double _H_ZERO_FLOOR = 0.03; // ถ้า Hn ≤ 0.03 ⇒ C = 0
+
 class ComplexityCV {
-  /// คืนค่า LMC Complexity (สำหรับ dx=dy=2 จะอยู่ราวๆ 0..0.2155)
-  /// รวมเฉพาะหน้าต่างที่ทุกพิกเซลอยู่ใน mask (all-4-inside)
   static double edgeDensity(
     cv.Mat bgr, {
     cv.Mat? mask,
     int dx = 2,
     int dy = 2,
+    int? bleedFixPx,
+    double? zeroFloorH,
   }) {
-    final _GrayMask gm = _prepareGrayAndMask(bgr, mask);
+    print('🚀 ComplexityCV vNEW called (dx=$dx, dy=$dy) mask?=${mask != null}');
+    final cv.Mat? safeMask = (mask == null)
+        ? null
+        : _prepareBinaryMask(mask, dx: dx, dy: dy, bleedFixPx: bleedFixPx);
+
+    if (safeMask != null) {
+      final m8 = (safeMask.type == 0) ? safeMask : cv.convertScaleAbs(safeMask);
+      print('   └insidePx=${cv.countNonZero(m8)} size=${m8.cols}x${m8.rows}');
+    }
+
+    final _GrayMask gm = _prepareGrayAndMask(bgr, safeMask);
+    if (_isFlatRegion(gm)) return 0.0;
+
     final counts = _countPermDistribution(gm, dx: dx, dy: dy);
 
     int total = 0;
@@ -21,31 +40,96 @@ class ComplexityCV {
     if (total == 0) return 0.0;
 
     final p = List<double>.generate(counts.length, (i) => counts[i] / total);
-    final hn = _entropyNormalizedFromP(p);
+
+    final hn = _entropyNormalizedFromP(p).clamp(0.0, 1.0);
+    final thr = zeroFloorH ?? _H_ZERO_FLOOR;
+    if (hn <= thr) {
+      print('📊 ComplexityCV: Hn=$hn ≤ $thr → C=0');
+      return 0.0;
+    }
+
     final d = _jsDivToUniform(p);
     final ds = _dStar(p.length);
     final c = (ds > 0) ? (d * hn / ds) : 0.0;
-    return c.clamp(0.0, 1.0);
+    final out = (c < 1e-9) ? 0.0 : c.clamp(0.0, 1.0);
+    print('📊 ComplexityCV: Hn=$hn  D=$d  D*=$ds  C=$out');
+    return out;
   }
 
-  /// Alias ชื่อชัดๆ หากอยากเรียกตรงๆ ว่า LMC
   static double computeLMC(
     cv.Mat bgr, {
     cv.Mat? mask,
     int dx = 2,
     int dy = 2,
-  }) => edgeDensity(bgr, mask: mask, dx: dx, dy: dy);
+    int? bleedFixPx,
+    double? zeroFloorH,
+  }) {
+    return edgeDensity(
+      bgr,
+      mask: mask,
+      dx: dx,
+      dy: dy,
+      bleedFixPx: bleedFixPx,
+      zeroFloorH: zeroFloorH,
+    );
+  }
 }
 
-// ----------------------- helpers (เหมือน entropy) -----------------------
+// -------- helpers (อยู่นอกคลาส) --------
+
+cv.Mat _prepareBinaryMask(
+  cv.Mat mask, {
+  required int dx,
+  required int dy,
+  int? bleedFixPx,
+}) {
+  final mGray = (mask.channels > 1)
+      ? cv.cvtColor(mask, cv.COLOR_BGR2GRAY)
+      : mask.clone();
+  final mBin = cv
+      .threshold(mGray, 0.0, 255.0, cv.THRESH_BINARY | cv.THRESH_OTSU)
+      .$2;
+
+  // ดีฟอลต์หดอย่างน้อย 2px กันหน้าต่าง 2×2 ชนขอบเส้น
+  final k = (bleedFixPx ?? math.max(2, math.max(dx, dy) - 1)).clamp(0, 32);
+  if (k > 0) {
+    final ker = cv.getStructuringElement(0, (2 * k + 1, 2 * k + 1));
+    return cv.erode(mBin, ker);
+  }
+  return mBin;
+}
 
 class _GrayMask {
   final int w, h;
   final List<int> r, g, b;
   final List<int>? mask;
   _GrayMask(this.w, this.h, this.r, this.g, this.b, this.mask);
-
   double grayAt(int idx) => (r[idx] + g[idx] + b[idx]) / 3.0;
+}
+
+bool _isFlatRegion(_GrayMask gm) {
+  final int W = gm.w, H = gm.h;
+  double? base;
+  int total = 0, outlier = 0;
+
+  if (gm.mask == null) {
+    for (int i = 0, n = W * H; i < n; i++) {
+      final v = gm.grayAt(i);
+      base ??= v;
+      total++;
+      if ((v - base!).abs() > _EPS_FLAT) outlier++;
+    }
+  } else {
+    for (int i = 0, n = W * H; i < n; i++) {
+      if (gm.mask![i] == 0) continue;
+      final v = gm.grayAt(i);
+      base ??= v;
+      total++;
+      if ((v - base!).abs() > _EPS_FLAT) outlier++;
+    }
+  }
+  if (total == 0) return false;
+  return (outlier / total) <= _FLAT_OUTLIER_FRAC;
 }
 
 _GrayMask _prepareGrayAndMask(cv.Mat bgr, cv.Mat? mask) {
@@ -53,7 +137,6 @@ _GrayMask _prepareGrayAndMask(cv.Mat bgr, cv.Mat? mask) {
   final b = ch[0].data;
   final g = ch[1].data;
   final r = ch[2].data;
-
   List<int>? m;
   if (mask != null) {
     final m1 = (mask.channels > 1)
@@ -98,8 +181,7 @@ List<int> _countPermDistribution(
       for (int yy = 0; yy < dy; yy++) {
         final row = (y + yy) * W;
         for (int xx = 0; xx < dx; xx++) {
-          final idx = row + (x + xx);
-          vals[k++] = gm.grayAt(idx);
+          vals[k++] = gm.grayAt(row + (x + xx));
         }
       }
 

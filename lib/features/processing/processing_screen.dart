@@ -6,6 +6,10 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:image_picker/image_picker.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
+// image package สำหรับ preprocess/แปลง bytes
+import 'package:image/image.dart' as img;
+import '../../services/image/warp_crop.dart';
+
 import '../../services/metrics/zscore_service.dart';
 import '../../services/metrics/masks_cv.dart'
     show shrinkInsideForSafeCount, ensureWhiteIsInside;
@@ -15,7 +19,10 @@ import '../../services/metrics/cotl_cv.dart';
 import '../../services/metrics/entropy_cv.dart';
 import '../../services/metrics/complexity_cv.dart';
 
-// สำหรับบันทึกประวัติ (แบบไฟล์ JSON/รูปใน Documents)
+// ⬇️ AI segmentation (มี guard เมื่อไม่มีโมเดล)
+import '../../services/ai/paintseg_infer.dart';
+
+// ประวัติ
 import '../../data/models/history_record.dart';
 import '../../data/repositories/history_repo.dart';
 
@@ -31,8 +38,8 @@ class ProcessingScreen extends StatefulWidget {
 
   final Uint8List? imageBytes;
   final String? imageAssetPath;
-  final String maskAssetPath; // e.g. assets/masks/fish_mask.png
-  final String? templateName; // label แสดงผล
+  final String maskAssetPath;
+  final String? templateName;
   final String? imageName;
 
   @override
@@ -42,36 +49,38 @@ class ProcessingScreen extends StatefulWidget {
 class _ProcessingScreenState extends State<ProcessingScreen> {
   String? _error;
 
-  // preview
   Uint8List? _previewBytes;
-  int? _imgW, _imgH; // เก็บขนาดรูปหลัง resize (ไว้แสดงบน chip)
+  int? _imgW, _imgH;
 
-  // metrics (raw)
   double? _blank, _cotl, _entropy, _complexity;
 
-  // Index (raw) + ระดับ
   double? _indexRaw;
   String? _level;
 
-  // ช่วงอ้างอิงของ Index(raw) ต่อกลุ่มอายุ×เทมเพลต
   double? _lowCut, _highCut, _mu, _sigma;
 
-  // profile/template
-  late String _classKey; // 'Fish' | 'Pencil' | 'IceCream'
-  late int _age; // 4 หรือ 5
-  String _profileKey = ''; // owner ของประวัติ
+  late String _classKey;
+  late int _age;
+  String _profileKey = '';
 
   bool _started = false;
   late Future<void> _svcWarmup;
+
+  // ===== AI segmentation =====
+  late Future<void> _aiWarmup;
+  bool _useAiMask = false; // toggle by user
+  bool _aiMaskUsed = false; // actually used after success
 
   @override
   void initState() {
     super.initState();
     _svcWarmup = ZScoreService.instance.ensureLoaded();
+    _aiWarmup = PaintSeg.instance
+        .ensureLoaded(); // set available=true เมื่อมีไฟล์
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_started) return;
       _started = true;
-      _run(); // เริ่มประมวลผลครั้งแรก
+      _run();
     });
   }
 
@@ -161,7 +170,248 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     return bin;
   }
 
-  // ===== BottomSheet (เลือกแหล่งรูปภาพ – ดีไซน์ใหม่) =====
+  // ---------- Preprocess (center-crop + resize + bakeOrientation) ----------
+  Uint8List _preprocessBytes(Uint8List origin, {int target = 900}) {
+    final im = img.decodeImage(origin);
+    if (im == null) return origin;
+    final oriented = img.bakeOrientation(im);
+    final prepped = WarpCrop.centerCropResize(oriented, target: target);
+    _imgW = prepped.width;
+    _imgH = prepped.height;
+    return Uint8List.fromList(img.encodePng(prepped));
+  }
+
+  // แปลง PNG preview -> RGBA bytes ให้ PaintSeg
+  Uint8List _pngToRgba(Uint8List png) {
+    final im = img.decodeImage(png);
+    if (im == null) return png;
+    final rgba = im.getBytes(order: img.ChannelOrder.rgba);
+    return Uint8List.fromList(rgba);
+  }
+
+  // prob-map (0..1) -> mask_out (ขาว=นอก, ดำ=ใน), scale เท่ารูป
+  Future<cv.Mat> _probToMaskOut(
+    List<List<double>> prob,
+    int outW,
+    int outH, {
+    double thr = 0.5,
+    bool probIsInside =
+        true, // ถ้า prob แปลว่า "ใน" ให้กลับขั้วตอนสร้าง mask_out
+  }) async {
+    final h = prob.length;
+    final w = prob[0].length;
+
+    // ใช้ package:image ทำ 8-bit แล้วค่อย decode เป็น Mat เพื่อเลี่ยง ptr/CV_8U
+    final canvas = img.Image(width: w, height: h);
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        final inside = prob[y][x] >= thr;
+        final isOutsideWhite = probIsInside ? !inside : inside;
+        final v = isOutsideWhite ? 255 : 0;
+        canvas.setPixelRgba(x, y, v, v, v, 255);
+      }
+    }
+    final smallPng = Uint8List.fromList(img.encodePng(canvas));
+    cv.Mat m = await _decodeBgr(smallPng);
+    if (m.channels > 1) m = cv.cvtColor(m, cv.COLOR_BGR2GRAY);
+    final resized = cv.resize(m, (outW, outH), interpolation: cv.INTER_NEAREST);
+    return cv.threshold(resized, 127.0, 255.0, cv.THRESH_BINARY).$2;
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  // ---------- Pipeline ----------
+  Future<void> _run({Uint8List? overrideBytes}) async {
+    try {
+      // 1) load image
+      Uint8List rawBytes;
+      if (overrideBytes != null) {
+        rawBytes = overrideBytes;
+      } else if (widget.imageBytes != null) {
+        rawBytes = widget.imageBytes!;
+      } else if (widget.imageAssetPath != null) {
+        rawBytes = await _loadAssetBytes(widget.imageAssetPath!);
+      } else {
+        final src = await _askImageSource();
+        if (src == null) throw Exception('ยกเลิกการเลือกรูปภาพ');
+        final XFile? picked = await ImagePicker().pickImage(source: src);
+        if (picked == null) throw Exception('ยังไม่ได้เลือกรูปจาก $src');
+        rawBytes = await picked.readAsBytes();
+      }
+
+      // 2) preprocess
+      final preBytes = _preprocessBytes(rawBytes, target: 900);
+      _previewBytes = preBytes;
+      cv.Mat bgr = await _decodeBgr(preBytes);
+
+      // 3) prepare masks (AI first if available+enabled)
+      await _aiWarmup; // เผื่อโหลดช้า
+      cv.Mat? maskOutAi;
+      _aiMaskUsed = false;
+
+      if (_useAiMask) {
+        if (!PaintSeg.instance.available) {
+          _snack('ยังไม่มีโมเดล AI · ใช้ mask ปกติแทน');
+        } else if (_previewBytes != null && _imgW != null && _imgH != null) {
+          try {
+            final rgba = _pngToRgba(_previewBytes!);
+            final prob = PaintSeg.instance.run(rgba, _imgW!, _imgH!);
+            // สมมติ prob = ความน่าจะเป็น "พื้นที่ใน" → กลับขั้วให้เป็น mask_out
+            maskOutAi = await _probToMaskOut(
+              prob,
+              bgr.cols,
+              bgr.rows,
+              thr: 0.5,
+              probIsInside: true,
+            );
+            _aiMaskUsed = true;
+          } catch (e) {
+            debugPrint('AI mask failed: $e');
+            _snack('AI mask ใช้งานไม่ได้ · ใช้ mask ปกติแทน');
+            _aiMaskUsed = false;
+          }
+        }
+      }
+
+      // 4) เลือก inside masks
+      cv.Mat insideSafe;
+      cv.Mat insideForCotlSafe;
+
+      if (maskOutAi != null) {
+        // จาก AI: mask_out ขาว=นอก → inside = NOT(mask_out)
+        final insideFromAi = cv.bitwiseNOT(maskOutAi);
+        insideSafe = shrinkInsideForSafeCount(
+          ensureWhiteIsInside(insideFromAi),
+          px: 1,
+        );
+        insideForCotlSafe = insideSafe;
+      } else {
+        // จาก asset เดิม
+        final maskInRaw = await _loadBinaryMask(widget.maskAssetPath);
+        final insideRaw = ensureWhiteIsInside(maskInRaw);
+        final inside = cv.resize(insideRaw, (
+          bgr.cols,
+          bgr.rows,
+        ), interpolation: cv.INTER_NEAREST);
+        insideSafe = shrinkInsideForSafeCount(inside, px: 1);
+
+        final maskOutPath = widget.maskAssetPath
+            .replaceAll('assets/masks/', 'assets/masks_out/')
+            .replaceAll('_mask', '_mask_out');
+
+        try {
+          final maskOutRaw = await _loadBinaryMask(maskOutPath);
+          final insideFromOut = ensureWhiteIsInside(cv.bitwiseNOT(maskOutRaw));
+          final insideFromOutResized = cv.resize(insideFromOut, (
+            bgr.cols,
+            bgr.rows,
+          ), interpolation: cv.INTER_NEAREST);
+          insideForCotlSafe = shrinkInsideForSafeCount(
+            insideFromOutResized,
+            px: 1,
+          );
+        } catch (_) {
+          insideForCotlSafe = insideSafe;
+        }
+      }
+
+      // 5) channels
+      final gray = cv.cvtColor(bgr, cv.COLOR_BGR2GRAY);
+      final sat = _extractS(bgr);
+
+      // 6) metrics
+      final blank = await computeBlank(gray, sat, insideSafe);
+      final ent = EntropyCV.computeNormalized(bgr, mask: insideSafe);
+      final comp = ComplexityCV.edgeDensity(bgr, mask: insideSafe);
+      final cotl = await computeCotl(
+        gray,
+        sat,
+        cv.bitwiseNOT(insideForCotlSafe), // คาดหวัง mask_out
+      );
+
+      // 7) index & z
+      await _svcWarmup;
+      final raw = await ZScoreService.instance.computeRaw(
+        templateKey: _classKey,
+        age: _age,
+        h: ent,
+        c: comp,
+        blank: blank,
+        cotl: cotl,
+      );
+      final z = await ZScoreService.instance.compute(
+        templateKey: _classKey,
+        age: _age,
+        h: ent,
+        c: comp,
+        blank: blank,
+        cotl: cotl,
+      );
+
+      // 8) save history
+      try {
+        final Uint8List pngBytes = _previewBytes ?? preBytes;
+        String imagePath = '';
+        if (_profileKey.isNotEmpty) {
+          imagePath = await HistoryRepo.I.saveImageBytes(
+            pngBytes,
+            profileKey: _profileKey,
+          );
+        }
+
+        final now = DateTime.now();
+        final rec = HistoryRecord(
+          id: now.millisecondsSinceEpoch.toString(),
+          createdAt: now,
+          profileKey: _profileKey,
+          templateKey: _classKey,
+          age: _age,
+          h: ent,
+          c: comp,
+          blank: blank,
+          cotl: cotl,
+          zH: z.zH,
+          zC: z.zC,
+          zBlank: z.zBlank,
+          zCotl: z.zCotl,
+          zSum: z.zSum,
+          level: raw.level,
+          imagePath: imagePath,
+        );
+        await HistoryRepo.I.add(_profileKey, rec);
+        debugPrint('✅ [HIS] saved ${rec.id} for profile=$_profileKey');
+      } catch (e) {
+        debugPrint('⚠️ [HIS] save failed: $e');
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _blank = blank;
+        _cotl = cotl;
+        _entropy = ent;
+        _complexity = comp;
+
+        _indexRaw = raw.index;
+        _level = raw.level;
+
+        _lowCut = raw.lowCut;
+        _highCut = raw.highCut;
+        _mu = raw.mu;
+        _sigma = raw.sigma;
+
+        _error = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.toString());
+    }
+  }
+
+  // ===== UI helpers =====
+
   Future<ImageSource?> _askImageSource() async {
     if (!mounted) return null;
     final cs = Theme.of(context).colorScheme;
@@ -212,201 +462,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     );
   }
 
-  // ---------- Pipeline ----------
-  Future<void> _run({Uint8List? overrideBytes}) async {
-    try {
-      // 1) โหลดภาพจริง
-      cv.Mat bgr;
-      if (overrideBytes != null) {
-        bgr = await _decodeBgr(overrideBytes);
-      } else if (widget.imageBytes != null) {
-        bgr = await _decodeBgr(widget.imageBytes!);
-      } else if (widget.imageAssetPath != null) {
-        bgr = await _decodeBgr(await _loadAssetBytes(widget.imageAssetPath!));
-      } else {
-        final src = await _askImageSource();
-        if (src == null) throw Exception('ยกเลิกการเลือกรูปภาพ');
-        final XFile? picked = await ImagePicker().pickImage(source: src);
-        if (picked == null) throw Exception('ยังไม่ได้เลือกรูปจาก $src');
-        bgr = await _decodeBgr(await picked.readAsBytes());
-      }
-
-      // preview (resize ให้เบาลง)
-      const maxW = 900;
-      if (bgr.cols > maxW) {
-        final s = maxW / bgr.cols;
-        bgr = cv.resize(bgr, (maxW, (bgr.rows * s).round()));
-      }
-      final preview = _matToPng(bgr);
-      _imgW = bgr.cols;
-      _imgH = bgr.rows;
-
-      // 2) โหลด mask ภายในเส้น + ภายนอกเส้น
-      final maskInRaw = await _loadBinaryMask(widget.maskAssetPath);
-      final insideRaw = ensureWhiteIsInside(maskInRaw);
-      final inside = cv.resize(insideRaw, (
-        bgr.cols,
-        bgr.rows,
-      ), interpolation: cv.INTER_NEAREST);
-      final insideSafe = shrinkInsideForSafeCount(inside, px: 1);
-
-      final maskOutPath = widget.maskAssetPath
-          .replaceAll('assets/masks/', 'assets/masks_out/')
-          .replaceAll('_mask', '_mask_out');
-
-      cv.Mat insideForCotlSafe;
-      try {
-        final maskOutRaw = await _loadBinaryMask(maskOutPath);
-        final insideFromOut = ensureWhiteIsInside(cv.bitwiseNOT(maskOutRaw));
-        final insideFromOutResized = cv.resize(insideFromOut, (
-          bgr.cols,
-          bgr.rows,
-        ), interpolation: cv.INTER_NEAREST);
-        insideForCotlSafe = shrinkInsideForSafeCount(
-          insideFromOutResized,
-          px: 1,
-        );
-      } catch (_) {
-        insideForCotlSafe = insideSafe;
-      }
-
-      // 3) channels
-      final gray = cv.cvtColor(bgr, cv.COLOR_BGR2GRAY);
-      final sat = _extractS(bgr);
-
-      // 4) metrics (raw)
-      final blank = await computeBlank(gray, sat, insideSafe);
-      final ent = EntropyCV.computeNormalized(bgr, mask: insideSafe);
-      final comp = ComplexityCV.edgeDensity(bgr, mask: insideSafe);
-      final cotl = await computeCotl(gray, sat, insideForCotlSafe);
-
-      // 5) คำนวณ Index (raw) + Z-sum
-      await _svcWarmup;
-      final raw = await ZScoreService.instance.computeRaw(
-        templateKey: _classKey,
-        age: _age,
-        h: ent,
-        c: comp,
-        blank: blank,
-        cotl: cotl,
-      );
-      final z = await ZScoreService.instance.compute(
-        templateKey: _classKey,
-        age: _age,
-        h: ent,
-        c: comp,
-        blank: blank,
-        cotl: cotl,
-      );
-
-      // 6) บันทึกประวัติ (PNG + record)
-      try {
-        final Uint8List pngBytes = Uint8List.fromList(
-          cv.imencode('.png', bgr).$2.toList(),
-        );
-
-        String imagePath = '';
-        if (_profileKey.isNotEmpty) {
-          imagePath = await HistoryRepo.I.saveImageBytes(
-            pngBytes,
-            profileKey: _profileKey,
-          );
-        }
-
-        final now = DateTime.now();
-        final rec = HistoryRecord(
-          id: now.millisecondsSinceEpoch.toString(),
-          createdAt: now,
-          profileKey: _profileKey,
-          templateKey: _classKey,
-          age: _age,
-          h: ent,
-          c: comp,
-          blank: blank,
-          cotl: cotl,
-          // z-values (มาตรฐาน)
-          zH: z.zH,
-          zC: z.zC,
-          zBlank: z.zBlank,
-          zCotl: z.zCotl,
-          zSum: z.zSum,
-          // ระดับและไฟล์
-          level: raw.level,
-          imagePath: imagePath,
-        );
-
-        await HistoryRepo.I.add(_profileKey, rec);
-        debugPrint('✅ [HIS] saved ${rec.id} for profile=$_profileKey');
-      } catch (e) {
-        debugPrint('⚠️ [HIS] save failed: $e');
-      }
-
-      if (!mounted) return;
-      setState(() {
-        _previewBytes = preview;
-        _blank = blank;
-        _cotl = cotl;
-        _entropy = ent;
-        _complexity = comp;
-
-        _indexRaw = raw.index;
-        _level = raw.level;
-
-        _lowCut = raw.lowCut;
-        _highCut = raw.highCut;
-        _mu = raw.mu;
-        _sigma = raw.sigma;
-
-        _error = null;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _error = e.toString());
-    }
-  }
-
-  // เปิดดูรูปเต็มจอ (ซูม/ลากได้)
-  void _openFullImage() {
-    if (_previewBytes == null) return;
-    showDialog(
-      context: context,
-      barrierColor: Colors.black.withOpacity(0.85),
-      builder: (_) => Dialog(
-        insetPadding: const EdgeInsets.all(12),
-        backgroundColor: Colors.black,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(16),
-          child: InteractiveViewer(
-            minScale: 0.7,
-            maxScale: 5,
-            child: Image.memory(_previewBytes!, fit: BoxFit.contain),
-          ),
-        ),
-      ),
-    );
-  }
-
-  // เลือกรูปใหม่แล้วประมวลผลต่อทันที
-  Future<void> _changeImage() async {
-    final src = await _askImageSource();
-    if (src == null) return;
-    final XFile? picked = await ImagePicker().pickImage(source: src);
-    if (picked == null) return;
-    setState(() {
-      // รีเซ็ตค่าระหว่างโหลดใหม่
-      _previewBytes = null;
-      _blank = _cotl = _entropy = _complexity = null;
-      _indexRaw = null;
-      _level = null;
-      _lowCut = _highCut = _mu = _sigma = null;
-      _error = null;
-    });
-    final bytes = await picked.readAsBytes();
-    await _run(overrideBytes: bytes);
-  }
-
-  // ⭐ แปลงข้อความ level -> แสดงดาว (1–5) พร้อม gradient + แอนิเมชัน
+  // ⭐ ดาว
   Widget _buildStarLevel(String? level) {
     if (level == null || level.trim().isEmpty) {
       return Row(
@@ -423,7 +479,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     }
 
     final s = level.toLowerCase();
-    int stars = 3; // ปกติ = 3 ดาว
+    int stars = 3;
     final very = s.contains('มาก');
     final hi = s.contains('สูง') || s.contains('ดีกว่า') || s.contains('above');
     final low =
@@ -431,16 +487,17 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     final normal =
         s.contains('ปกติ') || s.contains('เกณฑ์') || s.contains('normal');
 
-    if (hi && very)
+    if (hi && very) {
       stars = 5;
-    else if (hi)
+    } else if (hi) {
       stars = 4;
-    else if (low && very)
+    } else if (low && very) {
       stars = 1;
-    else if (low)
+    } else if (low) {
       stars = 2;
-    else if (normal)
+    } else if (normal) {
       stars = 3;
+    }
 
     final gradient = const LinearGradient(
       colors: [Color(0xFFFFD700), Color(0xFFFFA726)],
@@ -448,46 +505,34 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       end: Alignment.bottomRight,
     );
 
-    return TweenAnimationBuilder<double>(
-      tween: Tween(begin: 0, end: 1),
-      duration: const Duration(milliseconds: 800),
-      curve: Curves.easeOutBack,
-      builder: (context, value, child) {
-        return Transform.scale(
-          scale: 0.9 + (0.1 * value),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: List.generate(5, (i) {
-              final filled = i < stars;
-              return Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 2),
-                child: ShaderMask(
-                  blendMode: BlendMode.srcIn,
-                  shaderCallback: (Rect bounds) =>
-                      gradient.createShader(bounds),
-                  child: Icon(
-                    filled ? Icons.star_rounded : Icons.star_border_rounded,
-                    size: 32,
-                    color: filled ? Colors.amber : Colors.grey.shade400,
-                    shadows: filled
-                        ? [
-                            Shadow(
-                              color: Colors.amber.withOpacity(0.6),
-                              blurRadius: 8,
-                            ),
-                          ]
-                        : [],
-                  ),
-                ),
-              );
-            }),
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(5, (i) {
+        final filled = i < stars;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2),
+          child: ShaderMask(
+            blendMode: BlendMode.srcIn,
+            shaderCallback: (Rect bounds) => gradient.createShader(bounds),
+            child: Icon(
+              filled ? Icons.star_rounded : Icons.star_border_rounded,
+              size: 32,
+              color: filled ? Colors.amber : Colors.grey.shade400,
+              shadows: filled
+                  ? [
+                      Shadow(
+                        color: Colors.amber.withOpacity(0.6),
+                        blurRadius: 8,
+                      ),
+                    ]
+                  : [],
+            ),
           ),
         );
-      },
+      }),
     );
   }
 
-  // ---------- UI ----------
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -519,11 +564,11 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         appBar: AppBar(title: Text('ประมวลผล · $templateLabel')),
         body: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const SizedBox(height: 8),
-            const Center(child: CircularProgressIndicator()),
-            const SizedBox(height: 10),
-            Text('กำลังประมวลผล...', style: theme.textTheme.bodyMedium),
+          children: const [
+            SizedBox(height: 8),
+            Center(child: CircularProgressIndicator()),
+            SizedBox(height: 10),
+            Text('กำลังประมวลผล...'),
           ],
         ),
       );
@@ -539,8 +584,35 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
               bytes: _previewBytes!,
               chipText:
                   'อายุ $_age ขวบ • $templateLabel'
-                  '${_imgW != null && _imgH != null ? ' • ${_imgW}×${_imgH}px' : ''}',
+                  '${_imgW != null && _imgH != null ? ' • ${_imgW}×${_imgH}px' : ''}'
+                  '${_aiMaskUsed ? ' • AI mask' : ''}',
               onZoom: _openFullImage,
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('ใช้ AI mask'),
+                  const SizedBox(width: 6),
+                  Switch(
+                    value: _useAiMask && PaintSeg.instance.available,
+                    onChanged: (v) async {
+                      if (v && !PaintSeg.instance.available) {
+                        _snack('ยังไม่มีโมเดล AI');
+                        return;
+                      }
+                      setState(() => _useAiMask = v);
+                      // re-run
+                      setState(() {
+                        _blank = _cotl = _entropy = _complexity = null;
+                        _indexRaw = null;
+                        _level = null;
+                        _lowCut = _highCut = _mu = _sigma = null;
+                        _error = null;
+                      });
+                      await _run(overrideBytes: _previewBytes!);
+                    },
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: 10),
             Row(
@@ -555,7 +627,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: _changeImage,
+                    onPressed: () => _changeImage(),
                     icon: const Icon(Icons.image_search_outlined),
                     label: const Text('เปลี่ยนรูป'),
                     style: ElevatedButton.styleFrom(
@@ -568,7 +640,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
             ),
             const SizedBox(height: 14),
 
-            // 🟣 การ์ดสรุปผล – ย้ายขึ้นมาให้เด่น
+            // 🟣 การ์ดสรุปผล
             Container(
               padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
@@ -662,16 +734,48 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     );
   }
 
-  String _guessTemplateName(String maskPath) {
-    final file = maskPath.split('/').last.toLowerCase();
-    if (file.contains('fish')) return 'ปลา';
-    if (file.contains('pencil')) return 'ดินสอ';
-    if (file.contains('ice')) return 'ไอศกรีม';
-    return file;
+  // เปิดดูรูปเต็มจอ
+  void _openFullImage() {
+    if (_previewBytes == null) return;
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.85),
+      builder: (_) => Dialog(
+        insetPadding: const EdgeInsets.all(12),
+        backgroundColor: Colors.black,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: InteractiveViewer(
+            minScale: 0.7,
+            maxScale: 5,
+            child: Image.memory(_previewBytes!, fit: BoxFit.contain),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // เลือกรูปใหม่แล้วประมวลผลต่อทันที
+  Future<void> _changeImage() async {
+    final src = await _askImageSource();
+    if (src == null) return;
+    final XFile? picked = await ImagePicker().pickImage(source: src);
+    if (picked == null) return;
+    setState(() {
+      _previewBytes = null;
+      _blank = _cotl = _entropy = _complexity = null;
+      _indexRaw = null;
+      _level = null;
+      _lowCut = _highCut = _mu = _sigma = null;
+      _error = null;
+    });
+    final bytes = await picked.readAsBytes();
+    await _run(overrideBytes: bytes);
   }
 }
 
-// ===== ปุ่มการ์ดที่ใช้ใน BottomSheet =====
+// ===== ปุ่มการ์ดใน bottom sheet =====
 class _SheetActionButton extends StatelessWidget {
   const _SheetActionButton({
     required this.icon,
@@ -732,17 +836,19 @@ class _SheetActionButton extends StatelessWidget {
   }
 }
 
-// ===== การ์ดพรีวิวรูป (ใหม่) =====
+// ===== การ์ดพรีวิวรูป (เพิ่มสวิตช์ AI mask) =====
 class _PreviewCard extends StatelessWidget {
   const _PreviewCard({
     required this.bytes,
     required this.chipText,
     required this.onZoom,
+    this.trailing,
   });
 
   final Uint8List bytes;
   final String chipText;
   final VoidCallback onZoom;
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -756,15 +862,12 @@ class _PreviewCard extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: Stack(
         children: [
-          // พื้นหลังนุ่ม ๆ กันขาวล้วน
           Container(
             color: cs.surfaceVariant.withOpacity(0.35),
             width: double.infinity,
             alignment: Alignment.center,
             child: Image.memory(bytes, fit: BoxFit.contain),
           ),
-
-          // Chip ข้อมูลภาพ
           Positioned(
             left: 10,
             top: 10,
@@ -802,8 +905,8 @@ class _PreviewCard extends StatelessWidget {
               ),
             ),
           ),
-
-          // ปุ่มขยาย
+          if (trailing != null)
+            Positioned(right: 10, bottom: 10, child: trailing!),
           Positioned(
             right: 8,
             top: 8,
