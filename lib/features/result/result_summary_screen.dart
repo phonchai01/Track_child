@@ -1,9 +1,9 @@
-// lib/features/result/result_summary_screen.dart
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../../services/metrics/zscore_service.dart';
 import '../../data/models/history_record.dart';
 import '../../data/repositories/history_repo_sqlite.dart';
+import '../../services/ai/ai_coach_service.dart'; // ✅ เพิ่ม
 
 class ResultSummaryScreen extends StatefulWidget {
   const ResultSummaryScreen({super.key});
@@ -14,13 +14,17 @@ class ResultSummaryScreen extends StatefulWidget {
 
 class _ResultSummaryScreenState extends State<ResultSummaryScreen> {
   bool _saved = false;
+  final _ai = AiCoachService(); // ✅ instance ผู้ช่วย AI
+  String? _aiFeedback;
+  String? _aiNextTemplate;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_saved) return;
-    _saved = true;
-    _saveHistoryIfPossible();
+    if (!_saved) {
+      _saved = true;
+      _saveHistoryIfPossible();
+    }
   }
 
   Future<void> _saveHistoryIfPossible() async {
@@ -100,6 +104,35 @@ class _ResultSummaryScreenState extends State<ResultSummaryScreen> {
     final Uint8List? previewBytes = args?['imageBytes'] as Uint8List?;
     final m = _extractMetricsDynamic(args?['metrics']);
 
+    // 🔹 เรียก AI ครั้งแรก (โหลด feedback และ next suggestion)
+    if (_aiFeedback == null && index != null && z != null) {
+      _ai
+          .buildParentFeedback(
+            templateName: templateKey,
+            age: age,
+            entropy: m['h'] ?? 0,
+            complexity: m['c'] ?? 0,
+            blank: m['blank'] ?? 0,
+            cotl: m['cotl'] ?? 0,
+            index: index,
+            levelText: level ?? '-',
+          )
+          .then((txt) {
+            if (mounted) setState(() => _aiFeedback = txt);
+          });
+
+      _ai
+          .suggestNextTemplate(
+            currentTemplate: templateKey,
+            zSum: index,
+            cotl: m['cotl'] ?? 0,
+            blank: m['blank'] ?? 0,
+          )
+          .then((txt) {
+            if (mounted) setState(() => _aiNextTemplate = txt);
+          });
+    }
+
     return Scaffold(
       appBar: AppBar(title: Text('ผลการประเมิน · ${_title(templateKey)}')),
       body: Container(
@@ -124,6 +157,7 @@ class _ResultSummaryScreenState extends State<ResultSummaryScreen> {
               style: const TextStyle(fontSize: 16),
             ),
             const Divider(height: 20),
+
             _card(
               'ค่าชี้วัดดิบ',
               Column(
@@ -135,7 +169,9 @@ class _ResultSummaryScreenState extends State<ResultSummaryScreen> {
                 ],
               ),
             ),
+
             const SizedBox(height: 12),
+
             _card(
               'ดัชนีรวม (Index – raw)',
               Column(
@@ -157,6 +193,28 @@ class _ResultSummaryScreenState extends State<ResultSummaryScreen> {
                 ],
               ),
             ),
+
+            const SizedBox(height: 12),
+
+            if (_aiFeedback != null)
+              _card(
+                'คำแนะนำจากผู้ช่วยอัตโนมัติ',
+                Text(_aiFeedback!, style: const TextStyle(height: 1.4)),
+              )
+            else
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(8),
+                  child: CircularProgressIndicator(),
+                ),
+              ),
+
+            if (_aiNextTemplate != null)
+              _card(
+                'เทมเพลตถัดไปที่แนะนำ',
+                Text(_aiNextTemplate!, style: const TextStyle(height: 1.3)),
+              ),
+
             const SizedBox(height: 20),
             FilledButton.icon(
               onPressed: () => Navigator.pop(context),
@@ -172,10 +230,10 @@ class _ResultSummaryScreenState extends State<ResultSummaryScreen> {
   // ---------------- Helper Widgets ----------------
   Widget _card(String title, Widget child) {
     return Card(
-      elevation: 1,
+      elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -210,9 +268,7 @@ class _ResultSummaryScreenState extends State<ResultSummaryScreen> {
 
   // ⭐ ดาวประเมินระดับ
   Widget _buildStarLevel(String? level) {
-    if (level == null || level.trim().isEmpty) {
-      return _stars(0);
-    }
+    if (level == null || level.trim().isEmpty) return _stars(0);
     final s = level.toLowerCase();
     int stars;
     if (s.contains('สูง')) {

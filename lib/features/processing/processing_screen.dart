@@ -44,6 +44,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 
   // preview
   Uint8List? _previewBytes;
+  int? _imgW, _imgH; // เก็บขนาดรูปหลัง resize (ไว้แสดงบน chip)
 
   // metrics (raw)
   double? _blank, _cotl, _entropy, _complexity;
@@ -70,7 +71,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_started) return;
       _started = true;
-      _run();
+      _run(); // เริ่มประมวลผลครั้งแรก
     });
   }
 
@@ -160,38 +161,51 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     return bin;
   }
 
+  // ===== BottomSheet (เลือกแหล่งรูปภาพ – ดีไซน์ใหม่) =====
   Future<ImageSource?> _askImageSource() async {
     if (!mounted) return null;
+    final cs = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
     return await showModalBottomSheet<ImageSource>(
       context: context,
       showDragHandle: true,
+      useSafeArea: true,
+      backgroundColor: cs.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
       builder: (ctx) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 18),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
               'เลือกแหล่งรูปภาพ',
-              style: Theme.of(ctx).textTheme.titleMedium,
+              style: textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'เลือกรูปจากแกลเลอรีหรือถ่ายใหม่ด้วยกล้อง',
+              style: textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+            ),
+            const SizedBox(height: 14),
+            _SheetActionButton(
+              icon: Icons.photo_library_outlined,
+              label: 'เลือกรูปจากแกลเลอรี',
+              filled: true,
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
             ),
             const SizedBox(height: 10),
-            ElevatedButton.icon(
-              onPressed: () => Navigator.pop(ctx, ImageSource.gallery),
-              icon: const Icon(Icons.photo_library_outlined),
-              label: const Text('เลือกรูปจากแกลเลอรี'),
-              style: ElevatedButton.styleFrom(
-                minimumSize: const Size.fromHeight(44),
-              ),
+            _SheetActionButton(
+              icon: Icons.photo_camera_outlined,
+              label: 'ถ่ายรูปด้วยกล้อง',
+              filled: false,
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
             ),
             const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: () => Navigator.pop(ctx, ImageSource.camera),
-              icon: const Icon(Icons.photo_camera_outlined),
-              label: const Text('ถ่ายรูปด้วยกล้อง'),
-              style: OutlinedButton.styleFrom(
-                minimumSize: const Size.fromHeight(44),
-              ),
-            ),
           ],
         ),
       ),
@@ -199,11 +213,13 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   }
 
   // ---------- Pipeline ----------
-  Future<void> _run() async {
+  Future<void> _run({Uint8List? overrideBytes}) async {
     try {
       // 1) โหลดภาพจริง
       cv.Mat bgr;
-      if (widget.imageBytes != null) {
+      if (overrideBytes != null) {
+        bgr = await _decodeBgr(overrideBytes);
+      } else if (widget.imageBytes != null) {
         bgr = await _decodeBgr(widget.imageBytes!);
       } else if (widget.imageAssetPath != null) {
         bgr = await _decodeBgr(await _loadAssetBytes(widget.imageAssetPath!));
@@ -222,6 +238,8 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         bgr = cv.resize(bgr, (maxW, (bgr.rows * s).round()));
       }
       final preview = _matToPng(bgr);
+      _imgW = bgr.cols;
+      _imgH = bgr.rows;
 
       // 2) โหลด mask ภายในเส้น + ภายนอกเส้น
       final maskInRaw = await _loadBinaryMask(widget.maskAssetPath);
@@ -347,7 +365,48 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     }
   }
 
-  // ⭐ แปลงข้อความ level -> จำนวนดาว (1..5) แล้ววาดเป็นไอคอน
+  // เปิดดูรูปเต็มจอ (ซูม/ลากได้)
+  void _openFullImage() {
+    if (_previewBytes == null) return;
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.85),
+      builder: (_) => Dialog(
+        insetPadding: const EdgeInsets.all(12),
+        backgroundColor: Colors.black,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: InteractiveViewer(
+            minScale: 0.7,
+            maxScale: 5,
+            child: Image.memory(_previewBytes!, fit: BoxFit.contain),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // เลือกรูปใหม่แล้วประมวลผลต่อทันที
+  Future<void> _changeImage() async {
+    final src = await _askImageSource();
+    if (src == null) return;
+    final XFile? picked = await ImagePicker().pickImage(source: src);
+    if (picked == null) return;
+    setState(() {
+      // รีเซ็ตค่าระหว่างโหลดใหม่
+      _previewBytes = null;
+      _blank = _cotl = _entropy = _complexity = null;
+      _indexRaw = null;
+      _level = null;
+      _lowCut = _highCut = _mu = _sigma = null;
+      _error = null;
+    });
+    final bytes = await picked.readAsBytes();
+    await _run(overrideBytes: bytes);
+  }
+
+  // ⭐ แปลงข้อความ level -> แสดงดาว (1–5) พร้อม gradient + แอนิเมชัน
   Widget _buildStarLevel(String? level) {
     if (level == null || level.trim().isEmpty) {
       return Row(
@@ -356,7 +415,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
           5,
           (i) => Icon(
             Icons.star_border_rounded,
-            size: 28,
+            size: 30,
             color: Colors.grey.shade400,
           ),
         ),
@@ -364,49 +423,67 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     }
 
     final s = level.toLowerCase();
-    int stars = 3; // พื้นฐาน = ปกติ
-
-    // รองรับทั้งไทย/อังกฤษ
-    final very = s.contains('มาก'); // very
-    final hi =
-        s.contains('สูง') ||
-        s.contains('ดีกว่า') ||
-        s.contains('above') ||
-        s.contains('better');
+    int stars = 3; // ปกติ = 3 ดาว
+    final very = s.contains('มาก');
+    final hi = s.contains('สูง') || s.contains('ดีกว่า') || s.contains('above');
     final low =
-        s.contains('ต่ำ') ||
-        s.contains('ต่ำกว่า') ||
-        s.contains('below') ||
-        s.contains('worse');
+        s.contains('ต่ำ') || s.contains('ต่ำกว่า') || s.contains('below');
     final normal =
-        s.contains('ปกติ') ||
-        s.contains('เกณฑ์') ||
-        s.contains('within') ||
-        s.contains('normal') ||
-        s.contains('standard');
+        s.contains('ปกติ') || s.contains('เกณฑ์') || s.contains('normal');
 
-    if (hi && very) {
+    if (hi && very)
       stars = 5;
-    } else if (hi) {
+    else if (hi)
       stars = 4;
-    } else if (low && very) {
+    else if (low && very)
       stars = 1;
-    } else if (low) {
+    else if (low)
       stars = 2;
-    } else if (normal) {
+    else if (normal)
       stars = 3;
-    }
 
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: List.generate(
-        5,
-        (i) => Icon(
-          i < stars ? Icons.star_rounded : Icons.star_border_rounded,
-          size: 28,
-          color: i < stars ? Colors.amber : Colors.grey.shade400,
-        ),
-      ),
+    final gradient = const LinearGradient(
+      colors: [Color(0xFFFFD700), Color(0xFFFFA726)],
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+    );
+
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 800),
+      curve: Curves.easeOutBack,
+      builder: (context, value, child) {
+        return Transform.scale(
+          scale: 0.9 + (0.1 * value),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: List.generate(5, (i) {
+              final filled = i < stars;
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: ShaderMask(
+                  blendMode: BlendMode.srcIn,
+                  shaderCallback: (Rect bounds) =>
+                      gradient.createShader(bounds),
+                  child: Icon(
+                    filled ? Icons.star_rounded : Icons.star_border_rounded,
+                    size: 32,
+                    color: filled ? Colors.amber : Colors.grey.shade400,
+                    shadows: filled
+                        ? [
+                            Shadow(
+                              color: Colors.amber.withOpacity(0.6),
+                              blurRadius: 8,
+                            ),
+                          ]
+                        : [],
+                  ),
+                ),
+              );
+            }),
+          ),
+        );
+      },
     );
   }
 
@@ -414,6 +491,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final cs = theme.colorScheme;
     final templateLabel =
         widget.templateName ?? _templateLabelFromKey(_classKey);
 
@@ -439,7 +517,15 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     if (waiting) {
       return Scaffold(
         appBar: AppBar(title: Text('ประมวลผล · $templateLabel')),
-        body: const Center(child: CircularProgressIndicator()),
+        body: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const SizedBox(height: 8),
+            const Center(child: CircularProgressIndicator()),
+            const SizedBox(height: 10),
+            Text('กำลังประมวลผล...', style: theme.textTheme.bodyMedium),
+          ],
+        ),
       );
     }
 
@@ -449,16 +535,78 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         padding: const EdgeInsets.all(16),
         children: [
           if (_previewBytes != null) ...[
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: Image.memory(_previewBytes!, fit: BoxFit.contain),
+            _PreviewCard(
+              bytes: _previewBytes!,
+              chipText:
+                  'อายุ $_age ขวบ • $templateLabel'
+                  '${_imgW != null && _imgH != null ? ' • ${_imgW}×${_imgH}px' : ''}',
+              onZoom: _openFullImage,
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _openFullImage,
+                    icon: const Icon(Icons.open_in_full_rounded),
+                    label: const Text('เปิดเต็มจอ'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _changeImage,
+                    icon: const Icon(Icons.image_search_outlined),
+                    label: const Text('เปลี่ยนรูป'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: cs.primary,
+                      foregroundColor: cs.onPrimary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+
+            // 🟣 การ์ดสรุปผล – ย้ายขึ้นมาให้เด่น
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: cs.primaryContainer.withOpacity(0.28),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: cs.primary.withOpacity(0.25)),
+                boxShadow: [
+                  BoxShadow(
+                    color: cs.primary.withOpacity(0.10),
+                    blurRadius: 16,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'ภาพรวมการประเมิน',
+                    style: theme.textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  _buildStarLevel(_level),
+                  const SizedBox(height: 6),
+                  Text(
+                    _level ?? '-',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: cs.onSurface.withOpacity(0.75),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
           ],
-          Text(
-            'อายุ $_age ขวบ  |  เทมเพลต $templateLabel',
-            style: theme.textTheme.titleMedium,
-          ),
 
           const Divider(height: 28),
 
@@ -483,23 +631,9 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
               ),
             ),
 
-          const SizedBox(height: 10),
-          const Text(
-            'การแปลผลโดยภาพรวม',
-            style: TextStyle(fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 6),
-          _buildStarLevel(_level), // ⭐ แสดงดาวตามระดับ
-          const SizedBox(height: 4),
-          Text(
-            _level ?? '-',
-            style: const TextStyle(fontSize: 14, color: Colors.black54),
-          ),
-
           const SizedBox(height: 32),
           ElevatedButton.icon(
-            onPressed: () =>
-                Navigator.pop(context), // ย้อนกลับไป TemplatePicker
+            onPressed: () => Navigator.pop(context),
             icon: const Icon(Icons.home_outlined),
             label: const Text('กลับไปหน้าเลือกเทมเพลต'),
             style: ElevatedButton.styleFrom(
@@ -534,5 +668,174 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     if (file.contains('pencil')) return 'ดินสอ';
     if (file.contains('ice')) return 'ไอศกรีม';
     return file;
+  }
+}
+
+// ===== ปุ่มการ์ดที่ใช้ใน BottomSheet =====
+class _SheetActionButton extends StatelessWidget {
+  const _SheetActionButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.filled = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool filled;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    final bgColor = filled ? cs.primaryContainer.withOpacity(0.35) : cs.surface;
+    final borderColor = filled
+        ? cs.primary.withOpacity(0.35)
+        : cs.outlineVariant;
+    final iconColor = filled ? cs.primary : cs.onSurfaceVariant;
+    final textStyle = Theme.of(
+      context,
+    ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800);
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: borderColor),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.04),
+              blurRadius: 10,
+              offset: const Offset(0, 6),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Icon(icon, size: 22, color: iconColor),
+            const SizedBox(width: 12),
+            Expanded(child: Text(label, style: textStyle)),
+            Icon(
+              Icons.chevron_right_rounded,
+              color: cs.onSurfaceVariant,
+              size: 22,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ===== การ์ดพรีวิวรูป (ใหม่) =====
+class _PreviewCard extends StatelessWidget {
+  const _PreviewCard({
+    required this.bytes,
+    required this.chipText,
+    required this.onZoom,
+  });
+
+  final Uint8List bytes;
+  final String chipText;
+  final VoidCallback onZoom;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    return Card(
+      elevation: 2,
+      margin: EdgeInsets.zero,
+      color: cs.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
+          // พื้นหลังนุ่ม ๆ กันขาวล้วน
+          Container(
+            color: cs.surfaceVariant.withOpacity(0.35),
+            width: double.infinity,
+            alignment: Alignment.center,
+            child: Image.memory(bytes, fit: BoxFit.contain),
+          ),
+
+          // Chip ข้อมูลภาพ
+          Positioned(
+            left: 10,
+            top: 10,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: cs.surface.withOpacity(0.85),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: cs.outlineVariant),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.06),
+                    blurRadius: 8,
+                    offset: const Offset(0, 3),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.info_outline_rounded,
+                    size: 16,
+                    color: cs.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    chipText,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: cs.onSurface,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // ปุ่มขยาย
+          Positioned(
+            right: 8,
+            top: 8,
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: onZoom,
+                borderRadius: BorderRadius.circular(20),
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: cs.primary.withOpacity(0.9),
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: cs.primary.withOpacity(0.35),
+                        blurRadius: 12,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.zoom_in_rounded,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

@@ -6,15 +6,18 @@ import '../../routes.dart';
 
 class ProfileListScreen extends StatefulWidget {
   const ProfileListScreen({super.key});
-
   @override
   State<ProfileListScreen> createState() => _ProfileListScreenState();
 }
 
 class _ProfileListScreenState extends State<ProfileListScreen> {
   final _repo = CohortRepo();
+  final _searchCtrl = TextEditingController();
+
   List<Map<String, dynamic>> _items = [];
   bool _loading = true;
+  int? _ageFilter; // null | 4 | 5
+  String _sort = 'recent'; // recent | name
 
   @override
   void initState() {
@@ -23,36 +26,50 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
   }
 
   Future<void> _load() async {
-    final data = await _repo.getAll(); // [{id, name, age, ...}]
+    final data = await _repo.getAll();
     setState(() {
       _items = data;
       _loading = false;
     });
   }
 
-  // ----------------- Add/Edit/Delete -----------------
+  List<Map<String, dynamic>> get _visible {
+    var list = List<Map<String, dynamic>>.from(_items);
+    if (_ageFilter != null) {
+      list = list.where((e) => (e['age'] as int?) == _ageFilter).toList();
+    }
+    final q = _searchCtrl.text.trim().toLowerCase();
+    if (q.isNotEmpty) {
+      list = list
+          .where((e) => (e['name']?.toString().toLowerCase() ?? '').contains(q))
+          .toList();
+    }
+    if (_sort == 'name') {
+      list.sort((a, b) => (a['name'] ?? '').compareTo(b['name'] ?? ''));
+    } else {
+      list = list.reversed.toList();
+    }
+    return list;
+  }
+
   Future<void> _openEditor({Map<String, dynamic>? edit}) async {
     final result = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
-      showDragHandle: true,
       isScrollControlled: true,
+      showDragHandle: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
       builder: (_) => _ProfileEditor(initial: edit),
     );
     if (result == null) return;
 
     if (edit == null) {
-      await _repo.add(
-        name: result['name'] as String,
-        age: result['age'] as int,
-      );
+      await _repo.add(name: result['name'], age: result['age']);
     } else {
-      // ถ้า CohortRepo มี update ให้ใช้ด้านล่างแทน
-      // await _repo.update(id: edit['id'], name: result['name'], age: result['age']);
+      // ถ้ามี update() ใช้อันนั้นแทน
       await _repo.remove(edit['id'] as String);
-      await _repo.add(
-        name: result['name'] as String,
-        age: result['age'] as int,
-      );
+      await _repo.add(name: result['name'], age: result['age']);
     }
     await _load();
   }
@@ -61,7 +78,7 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: const Text('ลบโปรไฟล์นี้?'),
         content: Text('“${item['name']}” (อายุ ${item['age']} ขวบ) จะถูกลบ'),
         actions: [
@@ -83,7 +100,6 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
   }
 
   void _openTemplates(Map<String, dynamic> item) {
-    // ไปหน้า TemplatePicker พร้อมส่ง profile object ทั้งก้อน
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -98,66 +114,233 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
     Nav.toHistory(context, key);
   }
 
-  // ----------------- UI -----------------
+  // ===== 🎨 Fresh & Vibrant Palette (อิงอายุ) =====
+  // 4 ขวบ: sky→violet   |  5 ขวบ: coral→sunshine
+  List<Color> _avatarGradient(int age, ColorScheme cs) => age == 5
+      ? const [Color(0xFFFF8A80), Color(0xFFFFD54F)] // coral -> sunshine
+      : const [Color(0xFF7CC8FF), Color(0xFFA97BFF)]; // sky   -> violet
+  Color _cardBorder(int age) =>
+      age == 5 ? const Color(0xFFFFC1B3) : const Color(0xFFBDA7FF);
+  Color _badgeBg(int age, ColorScheme cs) =>
+      age == 5 ? const Color(0xFFFFE3DC) : const Color(0xFFE8DEFF);
+  Color _badgeFg(int age, ColorScheme cs) =>
+      age == 5 ? const Color(0xFF5D2B23) : const Color(0xFF2E1E6B);
+  Color _chipSelectedBg(int? age) =>
+      age == 5 ? const Color(0xFFFFF0E0) : const Color(0xFFEDE4FF);
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
 
     return Scaffold(
-      appBar: AppBar(
-        automaticallyImplyLeading: false,
-        title: const Text('เลือกโปรไฟล์เด็ก'),
-        actions: [
-          if (!_loading)
-            Padding(
-              padding: const EdgeInsets.only(right: 12),
-              child: Chip(
-                label: Text('${_items.length} โปรไฟล์'),
-                visualDensity: VisualDensity.compact,
-              ),
-            ),
-        ],
-      ),
-
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _items.isEmpty
-          ? _EmptyState(onAdd: () => _openEditor())
-          : ListView.separated(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
-              itemCount: _items.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 10),
-              itemBuilder: (context, i) {
-                final it = _items[i];
-                final idOrKey = (it['id'] ?? it['key'] ?? it['name'])
-                    .toString();
-                return Dismissible(
-                  key: ValueKey(idOrKey),
-                  direction: DismissDirection.endToStart,
-                  confirmDismiss: (_) async {
-                    await _confirmDelete(it);
-                    return false; // เราจัดการลบเอง แล้วรีเฟรช
-                  },
-                  background: _deleteBg(cs.errorContainer, cs.onErrorContainer),
-                  child: _ProfileCard(
-                    name: (it['name'] as String?)?.trim().isEmpty == true
-                        ? 'ไม่ทราบชื่อ'
-                        : it['name'] as String,
-                    age: (it['age'] as int?) ?? 0,
-                    onOpen: () => _openTemplates(it),
-                    onEdit: () => _openEditor(edit: it),
-                    onDelete: () => _confirmDelete(it),
-                  ),
-                );
-              },
-            ),
-
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _openEditor,
         icon: const Icon(Icons.add_rounded),
         label: const Text('โปรไฟล์ใหม่'),
+        // ✅ สดชื่นขึ้น
+        backgroundColor: const Color(0xFF7C4DFF),
+        foregroundColor: Colors.white,
       ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : RefreshIndicator(
+              onRefresh: _load,
+              child: CustomScrollView(
+                slivers: [
+                  // ---------- AppBar + Search ----------
+                  SliverAppBar(
+                    pinned: true,
+                    expandedHeight: 118,
+                    title: const Text('เลือกโปรไฟล์เด็ก'),
+                    flexibleSpace: FlexibleSpaceBar(
+                      background: SafeArea(
+                        bottom: false,
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 56, 16, 8),
+                          child: TextField(
+                            controller: _searchCtrl,
+                            onChanged: (_) => setState(() {}),
+                            decoration: InputDecoration(
+                              hintText: 'ค้นหาชื่อ…',
+                              prefixIcon: const Icon(Icons.search_rounded),
+                              suffixIcon: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (_searchCtrl.text.isNotEmpty)
+                                    IconButton(
+                                      tooltip: 'ล้าง',
+                                      onPressed: () {
+                                        _searchCtrl.clear();
+                                        setState(() {});
+                                      },
+                                      icon: const Icon(Icons.clear_rounded),
+                                    ),
+                                  PopupMenuButton<String>(
+                                    tooltip: 'จัดเรียง',
+                                    onSelected: (v) =>
+                                        setState(() => _sort = v),
+                                    itemBuilder: (_) => [
+                                      CheckedPopupMenuItem(
+                                        checked: _sort == 'recent',
+                                        value: 'recent',
+                                        child: const Text('ล่าสุดอยู่บน'),
+                                      ),
+                                      CheckedPopupMenuItem(
+                                        checked: _sort == 'name',
+                                        value: 'name',
+                                        child: const Text('เรียงตามชื่อ ก-ฮ'),
+                                      ),
+                                    ],
+                                    child: const Padding(
+                                      padding: EdgeInsets.only(right: 6),
+                                      child: Icon(Icons.sort_rounded),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              isDense: true,
+                              filled: true,
+                              fillColor: const Color(0xFFEFF7FF), // ✅ ฟ้าใส
+                              border: OutlineInputBorder(
+                                borderSide: const BorderSide(
+                                  color: Color(0xFFB3E0FF),
+                                ),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderSide: const BorderSide(
+                                  color: Color(0xFFB3E0FF),
+                                ),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderSide: const BorderSide(
+                                  color: Color(0xFF7C4DFF), // ✅ ม่วงสด
+                                ),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  // ---------- Sticky Filter (Wrap) ----------
+                  SliverPersistentHeader(
+                    pinned: true,
+                    delegate: _StickyWrapHeader(
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          _ColoredChoiceChip(
+                            label: 'ทั้งหมด',
+                            selected: _ageFilter == null,
+                            selectedBg: const Color(0xFFEDE4FF),
+                            onTap: () => setState(() => _ageFilter = null),
+                          ),
+                          _ColoredChoiceChip(
+                            label: '4 ขวบ',
+                            selected: _ageFilter == 4,
+                            selectedBg: _chipSelectedBg(4),
+                            onTap: () => setState(() => _ageFilter = 4),
+                          ),
+                          _ColoredChoiceChip(
+                            label: '5 ขวบ',
+                            selected: _ageFilter == 5,
+                            selectedBg: _chipSelectedBg(5),
+                            onTap: () => setState(() => _ageFilter = 5),
+                          ),
+                          // ตัวนับจำนวนรวม (โทนสดขึ้น)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFEAF4FF),
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(
+                                color: const Color(0xFFB3E0FF),
+                              ),
+                            ),
+                            child: Text(
+                              '${_items.length}',
+                              style: const TextStyle(
+                                color: Color(0xFF0B3D91),
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: .2,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  // ---------- Content ----------
+                  if (_visible.isEmpty)
+                    SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: _EmptyState(onAdd: _openEditor),
+                    )
+                  else
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(12, 12, 12, 110),
+                      sliver: SliverGrid.builder(
+                        gridDelegate:
+                            const SliverGridDelegateWithMaxCrossAxisExtent(
+                              maxCrossAxisExtent: 240,
+                              crossAxisSpacing: 10,
+                              mainAxisSpacing: 10,
+                              childAspectRatio: .98,
+                            ),
+                        itemCount: _visible.length,
+                        itemBuilder: (_, i) {
+                          final it = _visible[i];
+                          final idOrKey = (it['id'] ?? it['key'] ?? it['name'])
+                              .toString();
+
+                          return Dismissible(
+                            key: ValueKey(idOrKey),
+                            direction: DismissDirection.endToStart,
+                            confirmDismiss: (_) async {
+                              await _confirmDelete(it);
+                              return false;
+                            },
+                            background: _deleteBg(
+                              cs.errorContainer,
+                              cs.onErrorContainer,
+                            ),
+                            child: _GridProfileCard(
+                              name:
+                                  (it['name'] as String?)?.trim().isEmpty ==
+                                      true
+                                  ? 'ไม่ทราบชื่อ'
+                                  : it['name'] as String,
+                              age: (it['age'] as int?) ?? 0,
+                              onOpen: () => _openTemplates(it),
+                              onEdit: () => _openEditor(edit: it),
+                              onDelete: () => _confirmDelete(it),
+                              onHistory: () => _openHistory(it),
+                              avatarGradient: _avatarGradient(
+                                (it['age'] as int?) ?? 0,
+                                cs,
+                              ),
+                              cardBorder: _cardBorder((it['age'] as int?) ?? 0),
+                              badgeBg: _badgeBg((it['age'] as int?) ?? 0, cs),
+                              badgeFg: _badgeFg((it['age'] as int?) ?? 0, cs),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            ),
     );
   }
 
@@ -172,13 +355,76 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
   );
 }
 
-class _ProfileCard extends StatelessWidget {
-  const _ProfileCard({
+// ===== Sticky header สำหรับ Wrap =====
+class _StickyWrapHeader extends SliverPersistentHeaderDelegate {
+  _StickyWrapHeader({required this.child});
+  final Widget child;
+
+  @override
+  double get minExtent => 60;
+  @override
+  double get maxExtent => 60;
+
+  @override
+  Widget build(context, shrinkOffset, overlapsContent) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      color: cs.surface,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      alignment: Alignment.centerLeft,
+      child: child,
+    );
+  }
+
+  @override
+  bool shouldRebuild(_StickyWrapHeader oldDelegate) => false;
+}
+
+// ===== ChoiceChip แบบสดชื่น =====
+class _ColoredChoiceChip extends StatelessWidget {
+  const _ColoredChoiceChip({
+    required this.label,
+    required this.selected,
+    required this.selectedBg,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final Color selectedBg;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      onSelected: (_) => onTap(),
+      side: const BorderSide(color: Color(0xFFB3E0FF)),
+      selectedColor: selectedBg,
+      labelStyle: TextStyle(
+        color: selected
+            ? const Color(0xFF0B3D91)
+            : Theme.of(context).colorScheme.onSurface,
+        fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+      ),
+    );
+  }
+}
+
+// ===== การ์ดแบบ Grid (โทนสด) =====
+class _GridProfileCard extends StatelessWidget {
+  const _GridProfileCard({
     required this.name,
     required this.age,
     required this.onOpen,
     required this.onEdit,
     required this.onDelete,
+    required this.onHistory,
+    required this.avatarGradient,
+    required this.cardBorder,
+    required this.badgeBg,
+    required this.badgeFg,
   });
 
   final String name;
@@ -186,6 +432,12 @@ class _ProfileCard extends StatelessWidget {
   final VoidCallback onOpen;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
+  final VoidCallback onHistory;
+
+  final List<Color> avatarGradient;
+  final Color cardBorder;
+  final Color badgeBg;
+  final Color badgeFg;
 
   String get initials {
     final parts = name.trim().split(RegExp(r'\s+'));
@@ -203,53 +455,114 @@ class _ProfileCard extends StatelessWidget {
     return Material(
       color: cs.surface,
       elevation: 0.5,
-      borderRadius: BorderRadius.circular(16),
+      borderRadius: BorderRadius.circular(18),
       child: InkWell(
         onTap: onOpen,
-        borderRadius: BorderRadius.circular(16),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            children: [
-              _Avatar(initials: initials),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+        onLongPress: onEdit,
+        borderRadius: BorderRadius.circular(18),
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: cardBorder),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.05), // ✅ ชัดขึ้นนิด
+                blurRadius: 10,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              children: [
+                Container(
+                  width: 68,
+                  height: 68,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: avatarGradient,
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    initials,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w900,
+                      color: Colors.white, // ✅ ตัดกับไล่เฉดสด
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    color: const Color(0xFF1E2554),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                _AgeBadge(age: age, bg: badgeBg, fg: badgeFg),
+                const Spacer(),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      name,
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
+                    IconButton.filledTonal(
+                      tooltip: 'ประวัติ',
+                      onPressed: onHistory,
+                      icon: const Icon(Icons.timeline_rounded),
+                      style: IconButton.styleFrom(
+                        backgroundColor: const Color(0xFFEFF7FF),
+                        foregroundColor: const Color(0xFF0056B3),
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'อายุ $age ขวบ',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.hintColor,
-                      ),
+                    PopupMenuButton<String>(
+                      tooltip: 'เพิ่มเติม',
+                      onSelected: (v) {
+                        if (v == 'open') onOpen();
+                        if (v == 'edit') onEdit();
+                        if (v == 'delete') onDelete();
+                      },
+                      itemBuilder: (_) => [
+                        const PopupMenuItem(
+                          value: 'open',
+                          child: ListTile(
+                            dense: true,
+                            leading: Icon(Icons.play_arrow_rounded),
+                            title: Text('เริ่มเลือกเทมเพลต'),
+                          ),
+                        ),
+                        const PopupMenuItem(
+                          value: 'edit',
+                          child: ListTile(
+                            dense: true,
+                            leading: Icon(Icons.edit_rounded),
+                            title: Text('แก้ไขโปรไฟล์'),
+                          ),
+                        ),
+                        const PopupMenuDivider(),
+                        PopupMenuItem(
+                          value: 'delete',
+                          child: ListTile(
+                            dense: true,
+                            iconColor: Theme.of(context).colorScheme.error,
+                            textColor: Theme.of(context).colorScheme.error,
+                            leading: const Icon(Icons.delete_outline_rounded),
+                            title: const Text('ลบโปรไฟล์'),
+                          ),
+                        ),
+                      ],
+                      child: const Icon(Icons.more_vert_rounded),
                     ),
                   ],
                 ),
-              ),
-              const SizedBox(width: 8),
-              Wrap(
-                spacing: 6,
-                children: [
-                  IconButton.filledTonal(
-                    tooltip: 'แก้ไข',
-                    onPressed: onEdit,
-                    icon: const Icon(Icons.edit_rounded),
-                  ),
-                  IconButton(
-                    tooltip: 'ลบ',
-                    onPressed: onDelete,
-                    icon: const Icon(Icons.delete_outline_rounded),
-                  ),
-                ],
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -257,30 +570,26 @@ class _ProfileCard extends StatelessWidget {
   }
 }
 
-class _Avatar extends StatelessWidget {
-  const _Avatar({required this.initials});
-  final String initials;
+class _AgeBadge extends StatelessWidget {
+  const _AgeBadge({required this.age, required this.bg, required this.fg});
+  final int age;
+  final Color bg;
+  final Color fg;
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     return Container(
-      width: 56,
-      height: 56,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [cs.primaryContainer, cs.secondaryContainer],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(16),
+        color: bg,
+        borderRadius: BorderRadius.circular(999),
       ),
-      alignment: Alignment.center,
       child: Text(
-        initials,
-        style: Theme.of(
-          context,
-        ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+        'อายุ $age ขวบ',
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+          fontWeight: FontWeight.w700,
+          color: fg,
+        ),
       ),
     );
   }
@@ -325,11 +634,10 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-/// BottomSheet สร้าง/แก้ไขโปรไฟล์ (ชื่อ + อายุ 4/5)
+/// ===== BottomSheet (เวอร์ชันสวยขึ้น โทนสดชื่น) =====
 class _ProfileEditor extends StatefulWidget {
   const _ProfileEditor({this.initial});
   final Map<String, dynamic>? initial;
-
   @override
   State<_ProfileEditor> createState() => _ProfileEditorState();
 }
@@ -361,76 +669,235 @@ class _ProfileEditorState extends State<_ProfileEditor> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final inset = MediaQuery.of(context).viewInsets.bottom;
+    final cs = Theme.of(context).colorScheme;
 
-    return Padding(
+    return AnimatedPadding(
+      duration: const Duration(milliseconds: 150),
       padding: EdgeInsets.only(bottom: inset),
-      child: Form(
-        key: _form,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+      child: Material(
+        color: cs.surface,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Form(
+            key: _form,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // handle
+                  Container(
+                    width: 44,
+                    height: 5,
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: cs.outlineVariant,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                  // title
+                  Text(
+                    widget.initial == null
+                        ? 'สร้างโปรไฟล์ใหม่'
+                        : 'แก้ไขโปรไฟล์',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: .2,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 14),
+
+                  // name field (filled + chip icon)
+                  TextFormField(
+                    controller: _nameCtrl,
+                    autofocus: true,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: InputDecoration(
+                      labelText: 'ชื่อเด็ก',
+                      filled: true,
+                      fillColor: const Color(0xFFEFF7FF),
+                      prefixIcon: Container(
+                        margin: const EdgeInsets.only(left: 8, right: 8),
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFDCEBFF),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(Icons.badge_outlined),
+                      ),
+                      prefixIconConstraints: const BoxConstraints(
+                        minWidth: 0,
+                        minHeight: 0,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: const BorderSide(color: Color(0xFFB3E0FF)),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: const BorderSide(color: Color(0xFFB3E0FF)),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: const BorderSide(color: Color(0xFF7C4DFF)),
+                      ),
+                    ),
+                    validator: (v) {
+                      if (v == null || v.trim().isEmpty)
+                        return 'กรอกชื่อก่อนนะ';
+                      if (v.trim().length < 2) return 'ชื่อสั้นไปนิด';
+                      return null;
+                    },
+                    onFieldSubmitted: (_) => _submit(),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  // age chips
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'อายุ',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      ChoiceChip(
+                        label: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: const [
+                            Icon(Icons.check_circle, size: 18),
+                            SizedBox(width: 6),
+                            Text('4 ขวบ'),
+                          ],
+                        ),
+                        selected: _age == 4,
+                        onSelected: (_) => setState(() => _age = 4),
+                        selectedColor: const Color(0xFFEDE4FF),
+                        side: const BorderSide(color: Color(0xFFB3E0FF)),
+                        labelStyle: TextStyle(
+                          fontWeight: _age == 4
+                              ? FontWeight.w700
+                              : FontWeight.w500,
+                          color: _age == 4
+                              ? const Color(0xFF0B3D91)
+                              : cs.onSurface,
+                        ),
+                      ),
+                      ChoiceChip(
+                        label: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: const [
+                            Icon(Icons.check_circle, size: 18),
+                            SizedBox(width: 6),
+                            Text('5 ขวบ'),
+                          ],
+                        ),
+                        selected: _age == 5,
+                        onSelected: (_) => setState(() => _age = 5),
+                        selectedColor: const Color(0xFFFFF0E0),
+                        side: const BorderSide(color: Color(0xFFB3E0FF)),
+                        labelStyle: TextStyle(
+                          fontWeight: _age == 5
+                              ? FontWeight.w700
+                              : FontWeight.w500,
+                          color: _age == 5
+                              ? const Color(0xFF0B3D91)
+                              : cs.onSurface,
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 18),
+
+                  // buttons
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () => Navigator.pop(context),
+                          icon: const Icon(Icons.close_rounded),
+                          label: const Text('ยกเลิก'),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: const StadiumBorder(),
+                            side: BorderSide(color: cs.outlineVariant),
+                            foregroundColor: const Color(0xFF6B5FB2),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _GradientButton(
+                          onPressed: _submit,
+                          icon: Icons.check_rounded,
+                          label: 'ยืนยัน',
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ปุ่มแคปซูลไล่สี (ม่วง→ฟ้า สดชื่น)
+class _GradientButton extends StatelessWidget {
+  const _GradientButton({
+    required this.onPressed,
+    required this.icon,
+    required this.label,
+  });
+  final VoidCallback onPressed;
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      shape: const StadiumBorder(), // ✅ ถูกชนิด
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(
+          50,
+        ), // ✅ ใช้สำหรับ InkWell แยกกันได้
+        child: Ink(
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF7C4DFF), Color(0xFF5E8BFF)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            borderRadius: BorderRadius.all(Radius.circular(999)),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
+              Icon(icon, color: Colors.white),
+              const SizedBox(width: 6),
               Text(
-                widget.initial == null ? 'สร้างโปรไฟล์ใหม่' : 'แก้ไขโปรไฟล์',
-                style: theme.textTheme.titleLarge,
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _nameCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'ชื่อเด็ก',
-                  prefixIcon: Icon(Icons.badge_outlined),
-                  border: OutlineInputBorder(),
+                label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
                 ),
-                textInputAction: TextInputAction.done,
-                validator: (v) {
-                  if (v == null || v.trim().isEmpty) return 'กรอกชื่อก่อนนะ';
-                  if (v.trim().length < 2) return 'ชื่อสั้นไปนิด';
-                  return null;
-                },
               ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Text('อายุ', style: theme.textTheme.titleMedium),
-                  const SizedBox(width: 12),
-                  ChoiceChip(
-                    label: const Text('4 ขวบ'),
-                    selected: _age == 4,
-                    onSelected: (_) => setState(() => _age = 4),
-                  ),
-                  const SizedBox(width: 8),
-                  ChoiceChip(
-                    label: const Text('5 ขวบ'),
-                    selected: _age == 5,
-                    onSelected: (_) => setState(() => _age = 5),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.close_rounded),
-                      label: const Text('ยกเลิก'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: _submit,
-                      icon: const Icon(Icons.check_rounded),
-                      label: const Text('ยืนยัน'),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
             ],
           ),
         ),
