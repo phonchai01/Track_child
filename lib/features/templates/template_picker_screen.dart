@@ -70,13 +70,18 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
     final profile = (args?['profile'] as Map?)?.cast<String, dynamic>();
     final profileKey = _extractProfileKey(profile);
 
-    final cs = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final textTheme = theme.textTheme;
+
+    // ---- ควบคุม “ความสูงการ์ด” ให้พอดีกับจอ → กันล้นแนวตั้ง ----
+    final screenH = MediaQuery.of(context).size.height;
+    final double cardHeight = screenH < 700 ? 230 : (screenH < 820 ? 242 : 254);
 
     return Scaffold(
-      backgroundColor: cs.surface.withOpacity(0.98),
+      backgroundColor: cs.surface,
 
-      // ---------- AppBar (สองชั้น: บน=title/ปุ่ม, ล่าง=chip โปรไฟล์ + subtitle) ----------
+      // ---------- AppBar + ชั้นล่าง ----------
       appBar: AppBar(
         elevation: 0,
         backgroundColor: cs.surface,
@@ -91,7 +96,8 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
             icon: const Icon(Icons.history_rounded),
             tooltip: 'ดูประวัติการประเมิน',
             onPressed: () {
-              if (profileKey.isEmpty) {
+              final key = profileKey;
+              if (key.isEmpty) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('ยังไม่มีโปรไฟล์/คีย์โปรไฟล์')),
                 );
@@ -100,7 +106,7 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => HistoryListScreen(profileKey: profileKey),
+                  builder: (_) => HistoryListScreen(profileKey: key),
                 ),
               );
             },
@@ -151,9 +157,9 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
         padding: const EdgeInsets.fromLTRB(14, 6, 14, 14),
         child: GridView.builder(
           itemCount: kTemplates.length,
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 2,
-            childAspectRatio: 0.80,
+            mainAxisExtent: cardHeight, // ✅ กันล้นแนวตั้ง
             crossAxisSpacing: 12,
             mainAxisSpacing: 12,
           ),
@@ -201,7 +207,7 @@ class _TemplatePickerScreenState extends State<TemplatePickerScreen> {
   }
 }
 
-/// ======= การ์ดเทมเพลต (gradient + เงานุ่ม + ติ๊กมุม) =======
+/// ======= การ์ดเทมเพลต (responsive + gradient + shadow) =======
 class _TemplateCard extends StatelessWidget {
   const _TemplateCard({
     required this.spec,
@@ -215,7 +221,8 @@ class _TemplateCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
 
     final borderColor = selected ? cs.primary : cs.outlineVariant;
     final bgGradient = LinearGradient(
@@ -250,102 +257,121 @@ class _TemplateCard extends StatelessWidget {
             ),
           ],
         ),
-        child: Stack(
-          children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: LayoutBuilder(
+          builder: (context, c) {
+            final h = c.maxHeight;
+
+            // ปรับขนาด element ให้สัมพันธ์กับความสูงการ์ด
+            final double imageH = (h * 0.46).clamp(96.0, 128.0);
+            final double gapSm = (h * 0.025).clamp(6.0, 10.0);
+            final double gapMd = (h * 0.035).clamp(8.0, 12.0);
+
+            return Stack(
               children: [
-                // ภาพตัวอย่าง (ขอบมน + พื้นขาว + ขอบบาง)
-                Container(
-                  height: 120,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: Colors.black12),
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.asset(
-                      spec.templateAssetPath,
-                      fit: BoxFit.contain,
-                      width: 130,
-                      height: 100,
-                      errorBuilder: (_, __, ___) => Icon(
-                        Icons.image_outlined,
-                        size: 44,
-                        color: Colors.grey.shade500,
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // ภาพตัวอย่าง (พื้นขาว + ขอบบาง)
+                    Container(
+                      height: imageH,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: Colors.black12),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Image.asset(
+                          spec.templateAssetPath,
+                          fit: BoxFit.contain,
+                          width: imageH + 10,
+                          height: imageH - 10,
+                          errorBuilder: (_, __, ___) => Icon(
+                            Icons.image_outlined,
+                            size: imageH * 0.35,
+                            color: Colors.grey.shade500,
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    SizedBox(height: gapMd),
+
+                    // ชื่อเทมเพลต (หนา + กึ่งกลาง)
+                    Text(
+                      spec.title,
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+
+                    SizedBox(height: gapSm),
+
+                    // pill รอง (โทนขาวใส)
+                    Container(
+                      height: 32,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.65),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: Colors.black12.withOpacity(0.3),
+                        ),
+                      ),
+                      child: Text(
+                        spec.title,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+
+                    const Spacer(),
+                  ],
+                ),
+
+                // ติ๊กมุมขวาบนเมื่อถูกเลือก
+                Positioned(
+                  right: 0,
+                  top: 0,
+                  child: AnimatedOpacity(
+                    opacity: selected ? 1 : 0,
+                    duration: const Duration(milliseconds: 160),
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: cs.primary,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: cs.primary.withOpacity(0.35),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: const Icon(
+                        Icons.check,
+                        size: 16,
+                        color: Colors.white,
                       ),
                     ),
                   ),
                 ),
-                const SizedBox(height: 12),
-
-                // ชื่อเทมเพลต (หนา + กึ่งกลาง)
-                Text(
-                  spec.title,
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w800,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 8),
-
-                // pill รอง (ดูสะอาด)
-                Container(
-                  height: 32,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.65),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.black12.withOpacity(0.3)),
-                  ),
-                  child: Text(
-                    spec.title,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-
-                const Spacer(),
               ],
-            ),
-
-            // ติ๊กแสดงสถานะเลือก (มุมขวาบน)
-            Positioned(
-              right: 0,
-              top: 0,
-              child: AnimatedOpacity(
-                opacity: selected ? 1 : 0,
-                duration: const Duration(milliseconds: 160),
-                child: Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: cs.primary,
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                        color: cs.primary.withOpacity(0.35),
-                        blurRadius: 12,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: const Icon(Icons.check, size: 16, color: Colors.white),
-                ),
-              ),
-            ),
-          ],
+            );
+          },
         ),
       ),
     );
   }
 }
 
-/// ปุ่มหลัก (รองรับ disabled + สไตล์กลมมน + ยกนูนเล็กน้อย)
+/// ปุ่มหลัก (รองรับ disabled + สไตล์กลมมน + กรอบ gradient อ่อน ๆ)
 class _PrimaryButton extends StatelessWidget {
   const _PrimaryButton({
     required this.enabled,
@@ -383,7 +409,6 @@ class _PrimaryButton extends StatelessWidget {
       ),
     );
 
-    // กรอบ gradient อ่อน ๆ เมื่อ enabled ให้ดูพรีเมียม
     if (!enabled) return btn;
 
     return Container(

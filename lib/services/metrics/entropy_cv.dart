@@ -10,9 +10,9 @@
 import 'dart:math' as math;
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
-const double _EPS_FLAT = 1.0; // ยอมต่างเทาเล็กน้อย
-const double _FLAT_OUTLIER_FRAC = 0.002; // ยอม outlier ~0.2%
-const double _H_ZERO_FLOOR = 0.03; // ปัดเป็น 0 ถ้าต่ำกว่านี้
+const double _EPS_FLAT = 1.0;             // ยอมต่างเทาเล็กน้อย
+const double _FLAT_OUTLIER_FRAC = 0.002;  // ยอม outlier ~0.2%
+const double _H_ZERO_FLOOR = 0.03;        // ปัดเป็น 0 ถ้าต่ำกว่านี้
 
 class EntropyCV {
   static double computeNormalized(
@@ -59,12 +59,10 @@ cv.Mat _prepareBinaryMask(
   required int dy,
   int? bleedFixPx,
 }) {
-  final mGray = (mask.channels > 1)
-      ? cv.cvtColor(mask, cv.COLOR_BGR2GRAY)
-      : mask.clone();
-  final mBin = cv
-      .threshold(mGray, 0.0, 255.0, cv.THRESH_BINARY | cv.THRESH_OTSU)
-      .$2;
+  final mGray =
+      (mask.channels > 1) ? cv.cvtColor(mask, cv.COLOR_BGR2GRAY) : mask.clone();
+  final mBin =
+      cv.threshold(mGray, 0.0, 255.0, cv.THRESH_BINARY | cv.THRESH_OTSU).$2;
 
   // ดีฟอลต์: หดอย่างน้อย 2px กันหน้าต่าง 2×2 ชนเส้น
   final k = (bleedFixPx ?? math.max(2, math.max(dx, dy) - 1)).clamp(0, 32);
@@ -115,19 +113,14 @@ _GrayMask _prepareGrayAndMask(cv.Mat bgr, cv.Mat? mask) {
   final r = ch[2].data;
   List<int>? m;
   if (mask != null) {
-    final m1 = (mask.channels > 1)
-        ? cv.cvtColor(mask, cv.COLOR_BGR2GRAY).data
-        : mask.data;
+    final m1 =
+        (mask.channels > 1) ? cv.cvtColor(mask, cv.COLOR_BGR2GRAY).data : mask.data;
     m = List<int>.from(m1);
   }
   return _GrayMask(bgr.cols, bgr.rows, r.toList(), g.toList(), b.toList(), m);
 }
 
-List<int> _countPermDistribution(
-  _GrayMask gm, {
-  required int dx,
-  required int dy,
-}) {
+List<int> _countPermDistribution(_GrayMask gm, {required int dx, required int dy}) {
   final H = gm.h, W = gm.w;
   final m = dx * dy;
   final perms = _allPerms(m);
@@ -143,10 +136,7 @@ List<int> _countPermDistribution(
         for (int yy = 0; yy < dy && ok; yy++) {
           final row = (y + yy) * W;
           for (int xx = 0; xx < dx; xx++) {
-            if (gm.mask![row + (x + xx)] == 0) {
-              ok = false;
-              break;
-            }
+            if (gm.mask![row + (x + xx)] == 0) { ok = false; break; }
           }
         }
         if (!ok) continue;
@@ -180,16 +170,12 @@ List<int> _argsortStable(List<double> v) {
 List<List<int>> _allPerms(int m) {
   final res = <List<int>>[];
   void gen(List<int> cur, List<int> left) {
-    if (left.isEmpty) {
-      res.add(List<int>.from(cur));
-      return;
-    }
+    if (left.isEmpty) { res.add(List<int>.from(cur)); return; }
     for (int i = 0; i < left.length; i++) {
       final next = List<int>.from(left)..removeAt(i);
       gen([...cur, left[i]], next);
     }
   }
-
   gen([], List<int>.generate(m, (i) => i));
   return res;
 }
@@ -198,9 +184,7 @@ String _key(List<int> p) => p.join(',');
 
 double _S(Iterable<double> p) {
   double s = 0.0;
-  for (final pi in p) {
-    if (pi > 0) s += pi * math.log(1.0 / pi);
-  }
+  for (final pi in p) { if (pi > 0) s += pi * math.log(1.0 / pi); }
   return s;
 }
 
