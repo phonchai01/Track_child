@@ -1,10 +1,12 @@
 // lib/features/processing/processing_screen.dart
 import 'dart:async';
-import 'dart:typed_data';
+// import 'dart:typed_data';
+import 'dart:typed_data' as td;
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
+// import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/services.dart' as fs;
 import 'package:image_picker/image_picker.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
@@ -39,7 +41,8 @@ class ProcessingScreen extends StatefulWidget {
     this.imageName,
   });
 
-  final Uint8List? imageBytes;
+  // final Uint8List? imageBytes;
+  final td.Uint8List? imageBytes;
   final String? imageAssetPath;
   final String maskAssetPath; // e.g. assets/masks/fish_mask.png (ขาว=ด้านใน)
   final String? templateName; // label แสดงผล
@@ -68,7 +71,8 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   String? _error;
 
   // preview
-  Uint8List? _previewBytes;
+  // Uint8List? _previewBytes;
+  td.Uint8List? _previewBytes;
   int? _imgW, _imgH;
 
   // metrics (raw)
@@ -159,14 +163,19 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         _ => key,
       };
 
-  Future<cv.Mat> _decodeBgr(Uint8List bytes) async =>
+  // Future<cv.Mat> _decodeBgr(Uint8List bytes) async =>
+  Future<cv.Mat> _decodeBgr(td.Uint8List bytes) async =>
       cv.imdecode(bytes, cv.IMREAD_COLOR);
 
-  Uint8List _matToPng(cv.Mat m) =>
-      Uint8List.fromList(cv.imencode('.png', m).$2.toList());
+  // Uint8List _matToPng(cv.Mat m) =>
+  //     Uint8List.fromList(cv.imencode('.png', m).$2.toList());
+  td.Uint8List _matToPng(cv.Mat m) =>
+    td.Uint8List.fromList(cv.imencode('.png', m).$2.toList());
 
-  Future<Uint8List> _loadAssetBytes(String path) async {
-    final b = await rootBundle.load(path);
+  // Future<Uint8List> _loadAssetBytes(String path) async {
+  Future<td.Uint8List> _loadAssetBytes(String path) async {
+    // final b = await rootBundle.load(path);
+    final b = await fs.rootBundle.load(path);
     return b.buffer.asUint8List();
   }
 
@@ -187,22 +196,24 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   }
 
   // ---------- Preprocess (center-crop + resize + bakeOrientation) — แบบ 1 ----------
-  Uint8List _preprocessBytes(Uint8List origin, {int target = 900}) {
+  // Uint8List _preprocessBytes(Uint8List origin, {int target = 900}) {
+  td.Uint8List _preprocessBytes(td.Uint8List origin, {int target = 900}) {
     final im = img.decodeImage(origin);
     if (im == null) return origin;
     final oriented = img.bakeOrientation(im);
     final prepped = WarpCrop.centerCropResize(oriented, target: target);
     _imgW = prepped.width;
     _imgH = prepped.height;
-    return Uint8List.fromList(img.encodePng(prepped));
+    return td.Uint8List.fromList(img.encodePng(prepped));
   }
 
   // แปลง PNG preview -> RGBA bytes ให้ PaintSeg (แบบ 1)
-  Uint8List _pngToRgba(Uint8List png) {
+  // Uint8List _pngToRgba(Uint8List png) {
+  td.Uint8List _pngToRgba(td.Uint8List png) {
     final im = img.decodeImage(png);
     if (im == null) return png;
     final rgba = im.getBytes(order: img.ChannelOrder.rgba);
-    return Uint8List.fromList(rgba);
+    return td.Uint8List.fromList(rgba);
   }
 
   // prob-map (0..1) -> mask_out (ขาว=นอก, ดำ=ใน), scale เท่ารูป (แบบ 1)
@@ -226,7 +237,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         canvas.setPixelRgba(x, y, v, v, v, 255);
       }
     }
-    final smallPng = Uint8List.fromList(img.encodePng(canvas));
+    final smallPng = td.Uint8List.fromList(img.encodePng(canvas));
     cv.Mat m = await _decodeBgr(smallPng);
     if (m.channels > 1) m = cv.cvtColor(m, cv.COLOR_BGR2GRAY);
     final resized = cv.resize(m, (outW, outH), interpolation: cv.INTER_NEAREST);
@@ -334,10 +345,11 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   }
 
   // ---------- Pipeline ----------
-  Future<void> _run({Uint8List? overrideBytes}) async {
+  // Future<void> _run({Uint8List? overrideBytes}) async {
+  Future<void> _run({td.Uint8List? overrideBytes}) async {
     try {
       // 1) load image (แบบ 1: orientation+crop+resize)
-      Uint8List rawBytes;
+      td.Uint8List rawBytes;
       if (overrideBytes != null) {
         rawBytes = overrideBytes;
       } else if (widget.imageBytes != null) {
@@ -498,7 +510,8 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 
       // 8) save history
       try {
-        final Uint8List pngBytes = _previewBytes ?? _matToPng(bgr);
+        // final Uint8List pngBytes = _previewBytes ?? _matToPng(bgr);
+        final td.Uint8List pngBytes = _previewBytes ?? _matToPng(bgr);
         String imagePath = '';
         if (_profileKey.isNotEmpty) {
           imagePath = await HistoryRepo.I.saveImageBytes(
@@ -870,16 +883,6 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
 
           Text('ดัชนีรวม (Index – raw)', style: theme.textTheme.titleLarge),
           _metricRow('Index', _indexRaw ?? 0),
-          if (_lowCut != null && _highCut != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 6, left: 4, right: 4),
-              child: Text(
-                'ช่วงมาตรฐานของกลุ่ม (μ±σ): '
-                '[${_lowCut!.toStringAsFixed(4)}, ${_highCut!.toStringAsFixed(4)}]'
-                '${_mu != null && _sigma != null ? '  (μ=${_mu!.toStringAsFixed(4)}, σ=${_sigma!.toStringAsFixed(4)})' : ''}',
-                style: theme.textTheme.bodySmall,
-              ),
-            ),
 
           const SizedBox(height: 32),
           ElevatedButton.icon(
@@ -981,7 +984,8 @@ class _PreviewCard extends StatelessWidget {
     this.trailing,
   });
 
-  final Uint8List bytes;
+  // final Uint8List bytes;
+  final td.Uint8List bytes;
   final String chipText;
   final VoidCallback onZoom;
   final Widget? trailing;

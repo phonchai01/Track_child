@@ -107,96 +107,100 @@ class _HistoryChartScreenState extends State<HistoryChartScreen> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('กราฟดัชนี (Index)')),
-      body: FutureBuilder<List<HistoryRecord>>(
-        future: _future,
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final all = snap.data ?? [];
-          final items = _filterAndSort(all);
+      body: SafeArea( // ✅ กันล้นชนขอบบน/ล่างของจอ
+        child: FutureBuilder<List<HistoryRecord>>(
+          future: _future,
+          builder: (context, snap) {
+            if (snap.connectionState != ConnectionState.done) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            final all = snap.data ?? [];
+            final items = _filterAndSort(all);
 
-          // header: ตัวกรอง + ค่า diff ล่าสุด
-          final latest = items.isNotEmpty ? items.last.zSum : 0.0;
-          final prev = items.length > 1 ? items[items.length - 2].zSum : 0.0;
-          final diff = latest - prev;
+            // header: ตัวกรอง + ค่า diff ล่าสุด
+            final latest = items.isNotEmpty ? items.last.zSum : 0.0;
+            final prev = items.length > 1 ? items[items.length - 2].zSum : 0.0;
+            final diff = latest - prev;
 
-          return ListView(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
-            children: [
-              // ชิปเลือก template
-              Row(
-                children: [
-                  _TplChip(
-                    label: 'ทั้งหมด',
-                    selected: _tpl == 'all',
-                    onTap: () => setState(() => _tpl = 'all'),
-                  ),
-                  const SizedBox(width: 8),
-                  _TplChip(
-                    label: 'ปลา',
-                    selected: _tpl == 'fish',
-                    onTap: () => setState(() => _tpl = 'fish'),
-                  ),
-                  const SizedBox(width: 8),
-                  _TplChip(
-                    label: 'ดินสอ',
-                    selected: _tpl == 'pencil',
-                    onTap: () => setState(() => _tpl = 'pencil'),
-                  ),
-                  const SizedBox(width: 8),
-                  _TplChip(
-                    label: 'ไอศกรีม',
-                    selected: _tpl == 'icecream',
-                    onTap: () => setState(() => _tpl = 'icecream'),
-                  ),
-                  const Spacer(),
-                  // diff ล่าสุด
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: diff >= 0
-                          ? const Color(0xFFE9FFE8)
-                          : const Color(0xFFFFE8E8),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Text(
-                      (diff >= 0 ? '▲ ' : '▼ ') + diff.toStringAsFixed(3),
-                      style: TextStyle(
-                        color: diff >= 0
-                            ? const Color(0xFF1B8A3A)
-                            : const Color(0xFFB3261E),
-                        fontWeight: FontWeight.w800,
+            return ListView(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+              children: [
+                // ===== แถวชิปแบบเลื่อนแนวนอน + ป้าย diff =====
+                Row(
+                  children: [
+                    // ✅ ทำชิปให้เลื่อนได้แนวนอน แก้ overflow
+                    Expanded(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        clipBehavior: Clip.none, // เผื่อเงา/เอฟเฟกต์ไม่โดนตัด
+                        child: Row(
+                          children: [
+                            _TplChip(
+                              label: 'ทั้งหมด',
+                              selected: _tpl == 'all',
+                              onTap: () => setState(() => _tpl = 'all'),
+                            ),
+                            const SizedBox(width: 8),
+                            _TplChip(
+                              label: 'ปลา',
+                              selected: _tpl == 'fish',
+                              onTap: () => setState(() => _tpl = 'fish'),
+                            ),
+                            const SizedBox(width: 8),
+                            _TplChip(
+                              label: 'ดินสอ',
+                              selected: _tpl == 'pencil',
+                              onTap: () => setState(() => _tpl = 'pencil'),
+                            ),
+                            const SizedBox(width: 8),
+                            _TplChip(
+                              label: 'ไอศกรีม',
+                              selected: _tpl == 'icecream',
+                              onTap: () => setState(() => _tpl = 'icecream'),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-
-              // การ์ดกราฟ
-              Container(
-                padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
-                decoration: BoxDecoration(
-                  color: cs.surface,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: cs.outlineVariant),
-                ),
-                child: items.isEmpty
-                    ? const Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Center(
-                          child: Text('ยังไม่มีข้อมูลในเทมเพลตนี้'),
+                    const SizedBox(width: 8),
+                    // ป้าย diff ล่าสุด (ชิดขวา)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: diff >= 0 ? const Color(0xFFE9FFE8) : const Color(0xFFFFE8E8),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        (diff >= 0 ? '▲ ' : '▼ ') + diff.toStringAsFixed(3),
+                        style: TextStyle(
+                          color: diff >= 0 ? const Color(0xFF1B8A3A) : const Color(0xFFB3261E),
+                          fontWeight: FontWeight.w800,
                         ),
-                      )
-                    : _IndexBarChartWithThumbnails(items: items),
-              ),
-            ],
-          );
-        },
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+
+                // การ์ดกราฟ
+                Container(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+                  decoration: BoxDecoration(
+                    color: cs.surface,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: cs.outlineVariant),
+                  ),
+                  child: items.isEmpty
+                      ? const Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Center(child: Text('ยังไม่มีข้อมูลในเทมเพลตนี้')),
+                        )
+                      : _IndexBarChartWithThumbnails(items: items),
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -304,7 +308,7 @@ class _IndexBarChartWithThumbnails extends StatelessWidget {
               child: SizedBox(
                 width: chartWidth,
                 child: AspectRatio(
-                  aspectRatio: 16 / 8, // เตี้ยลงเล็กน้อยเพื่อเหลือที่ใต้กราฟ
+                  aspectRatio: 16 / 9, // เตี้ยลงเล็กน้อยเพื่อเหลือที่ใต้กราฟ
                   child: BarChart(
                     BarChartData(
                       minY: r.minY,

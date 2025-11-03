@@ -80,7 +80,6 @@ flutter:
     - assets/masks/
     - assets/templates/
     - assets/masks_out/
-    - assets/data/result_metrics.csv
     - assets/models/paintseg_fp16.tflite
     - assets/models/paintseg.tflite
     - assets/models/
