@@ -1,6 +1,7 @@
 // lib/features/history/history_list_screen.dart
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'history_chart_screen.dart';
 
 import '../../data/models/history_record.dart';
 import '../../data/repositories/history_repo.dart';
@@ -220,6 +221,19 @@ class _HistoryListScreenState extends State<HistoryListScreen> {
       appBar: AppBar(
         title: const Text('ประวัติการประเมิน'),
         actions: [
+          IconButton(
+            tooltip: 'กราฟดัชนี',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) =>
+                      HistoryChartScreen(profileKey: widget.profileKey),
+                ),
+              );
+            },
+            icon: const Icon(Icons.bar_chart_rounded),
+          ),
           IconButton(
             tooltip: 'รีเฟรช',
             onPressed: _reload,

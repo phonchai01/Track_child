@@ -5,6 +5,10 @@ import '../../data/repositories/cohort_repo.dart';
 import '../templates/template_picker_screen.dart';
 import '../../routes.dart';
 
+// ⭐ เพิ่ม: ใช้ดึงประวัติมาทำกราฟย่อ
+import '../../data/models/history_record.dart';
+import '../../data/repositories/history_repo.dart';
+
 class ProfileListScreen extends StatefulWidget {
   const ProfileListScreen({super.key});
 
@@ -40,6 +44,9 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
       _loading = false;
     });
   }
+
+  String _profileKeyOf(Map<String, dynamic> it) =>
+      (it['id'] ?? it['key'] ?? it['name']).toString();
 
   List<Map<String, dynamic>> get _visible {
     var list = List<Map<String, dynamic>>.from(_items);
@@ -124,7 +131,7 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
   }
 
   void _openHistory(Map<String, dynamic> item) {
-    final key = (item['id'] ?? item['key'] ?? item['name']).toString();
+    final key = _profileKeyOf(item);
     Nav.toHistory(context, key);
   }
 
@@ -147,7 +154,9 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
 
     // ความสูงการ์ดแบบคงที่/ยืดหยุ่นเล็กน้อย (กันล้นแนวตั้งทุกจอ)
     final screenH = MediaQuery.of(context).size.height;
-    final double cardHeight = screenH < 700 ? 210 : (screenH < 820 ? 224 : 236);
+    final double cardHeight = screenH < 700
+        ? 250
+        : (screenH < 820 ? 264 : 276); // ⤴ สูงขึ้นนิดเผื่อกราฟ
     final bottomInsets = MediaQuery.of(context).padding.bottom;
 
     return Scaffold(
@@ -324,8 +333,7 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
                         itemCount: _visible.length,
                         itemBuilder: (_, i) {
                           final it = _visible[i];
-                          final idOrKey = (it['id'] ?? it['key'] ?? it['name'])
-                              .toString();
+                          final idOrKey = _profileKeyOf(it);
 
                           return Dismissible(
                             key: ValueKey(idOrKey),
@@ -355,6 +363,9 @@ class _ProfileListScreenState extends State<ProfileListScreen> {
                               cardBorder: _cardBorder((it['age'] as int?) ?? 0),
                               badgeBg: _badgeBg((it['age'] as int?) ?? 0),
                               badgeFg: _badgeFg((it['age'] as int?) ?? 0),
+
+                              // ⭐ ใหม่: สำหรับโหลดกราฟย่อ
+                              profileKey: idOrKey,
                             ),
                           );
                         },
@@ -434,7 +445,7 @@ class _ColoredChoiceChip extends StatelessWidget {
   }
 }
 
-// ===== การ์ดแบบ Grid (fix overflow) =====
+// ===== การ์ดแบบ Grid (fix overflow) + สปาร์คไลน์ =====
 class _GridProfileCard extends StatelessWidget {
   const _GridProfileCard({
     required this.name,
@@ -447,6 +458,7 @@ class _GridProfileCard extends StatelessWidget {
     required this.cardBorder,
     required this.badgeBg,
     required this.badgeFg,
+    required this.profileKey,
   });
 
   final String name;
@@ -461,12 +473,25 @@ class _GridProfileCard extends StatelessWidget {
   final Color badgeBg;
   final Color badgeFg;
 
+  final String profileKey;
+
   String get initials {
     final parts = name.trim().split(RegExp(r'\s+'));
     if (parts.isEmpty || parts.first.isEmpty) return '👦';
     if (parts.length == 1) return parts.first.characters.first.toUpperCase();
     return (parts.first.characters.first + parts.last.characters.first)
         .toUpperCase();
+  }
+
+  Future<_TrendData> _loadTrend() async {
+    final list = await HistoryRepo.I.listByProfile(profileKey);
+    // เก่า -> ใหม่
+    list.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final last = list.length > 8 ? list.sublist(list.length - 8) : list;
+    final points = last.map((e) => e.zSum).toList();
+    final latest = points.isNotEmpty ? points.last : null;
+    final prev = points.length >= 2 ? points[points.length - 2] : null;
+    return _TrendData(points: points, latest: latest, previous: prev);
   }
 
   @override
@@ -496,119 +521,305 @@ class _GridProfileCard extends StatelessWidget {
           ),
           child: Padding(
             padding: const EdgeInsets.all(12),
-            child: LayoutBuilder(
-              builder: (context, c) {
-                final cardH = c.maxHeight;
-                // กำหนดช่วง avatar ให้ปลอดภัยทุกความสูง
-                final double avatar = (cardH * 0.30).clamp(44.0, 74.0);
-
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    // Avatar
-                    Container(
-                      width: avatar,
-                      height: avatar,
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: avatarGradient,
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                      alignment: Alignment.center,
-                      child: Text(
-                        initials,
-                        style: theme.textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.w900,
-                          color: Colors.white,
-                        ),
-                      ),
+            child: Column(
+              children: [
+                // Avatar
+                Container(
+                  width: 64,
+                  height: 64,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: avatarGradient,
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
                     ),
-
-                    const SizedBox(height: 8),
-
-                    // ชื่อ (1 บรรทัด, ellipsis)
-                    Text(
-                      name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w800,
-                        color: const Color(0xFF1E2554),
-                      ),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    initials,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w900,
+                      color: Colors.white,
                     ),
+                  ),
+                ),
 
-                    const SizedBox(height: 4),
+                const SizedBox(height: 8),
 
-                    // ป้ายอายุ
-                    _AgeBadge(age: age, bg: badgeBg, fg: badgeFg),
+                // ชื่อ (1 บรรทัด, ellipsis)
+                Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    color: const Color(0xFF1E2554),
+                  ),
+                ),
 
-                    const Spacer(), // ตอนนี้ปลอดภัย เพราะการ์ดสูงคงที่
-                    // แถวปุ่มล่าง
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                const SizedBox(height: 4),
+
+                // ป้ายอายุ
+                _AgeBadge(age: age, bg: badgeBg, fg: badgeFg),
+
+                // ===== มินิกราฟ Index (zSum) + Δ =====
+                const SizedBox(height: 10),
+                FutureBuilder<_TrendData>(
+                  future: _loadTrend(),
+                  builder: (context, snap) {
+                    if (snap.connectionState != ConnectionState.done) {
+                      return const SizedBox(
+                        height: 50,
+                        child: Center(
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      );
+                    }
+                    final data = snap.data ?? _TrendData.empty();
+                    final latest = data.latest;
+                    final prev = data.previous;
+                    final delta = (latest != null && prev != null)
+                        ? (latest - prev)
+                        : null;
+
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        IconButton.filledTonal(
-                          tooltip: 'ประวัติ',
-                          onPressed: onHistory,
-                          icon: const Icon(Icons.timeline_rounded),
-                          style: IconButton.styleFrom(
-                            backgroundColor: const Color(0xFFEFF7FF),
-                            foregroundColor: const Color(0xFF0056B3),
+                        Row(
+                          children: [
+                            Text(
+                              'Index (z)',
+                              style: theme.textTheme.labelMedium?.copyWith(
+                                color: theme.hintColor,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const Spacer(),
+                            if (latest != null)
+                              Text(
+                                latest.toStringAsFixed(2),
+                                style: theme.textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            const SizedBox(width: 6),
+                            if (delta != null) _DeltaBadge(value: delta),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        SizedBox(
+                          height: 34,
+                          child: _Sparkline(
+                            points: data.points,
+                            stroke: const Color(0xFF5E8BFF),
+                            fill: const Color(0x335E8BFF),
+                            guideColor: theme.dividerColor,
                           ),
                         ),
-                        PopupMenuButton<String>(
-                          tooltip: 'เพิ่มเติม',
-                          onSelected: (v) {
-                            if (v == 'open') onOpen();
-                            if (v == 'edit') onEdit();
-                            if (v == 'delete') onDelete();
-                          },
-                          itemBuilder: (_) => [
-                            const PopupMenuItem(
-                              value: 'open',
-                              child: ListTile(
-                                dense: true,
-                                leading: Icon(Icons.play_arrow_rounded),
-                                title: Text('เริ่มเลือกเทมเพลต'),
-                              ),
-                            ),
-                            const PopupMenuItem(
-                              value: 'edit',
-                              child: ListTile(
-                                dense: true,
-                                leading: Icon(Icons.edit_rounded),
-                                title: Text('แก้ไขโปรไฟล์'),
-                              ),
-                            ),
-                            const PopupMenuDivider(),
-                            PopupMenuItem(
-                              value: 'delete',
-                              child: ListTile(
-                                dense: true,
-                                iconColor: Theme.of(context).colorScheme.error,
-                                textColor: Theme.of(context).colorScheme.error,
-                                leading: const Icon(
-                                  Icons.delete_outline_rounded,
-                                ),
-                                title: const Text('ลบโปรไฟล์'),
-                              ),
-                            ),
-                          ],
-                          child: const Icon(Icons.more_vert_rounded),
+                      ],
+                    );
+                  },
+                ),
+
+                const Spacer(),
+
+                // แถวปุ่มล่าง
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    IconButton.filledTonal(
+                      tooltip: 'ประวัติ',
+                      onPressed: onHistory,
+                      icon: const Icon(Icons.timeline_rounded),
+                      style: IconButton.styleFrom(
+                        backgroundColor: const Color(0xFFEFF7FF),
+                        foregroundColor: const Color(0xFF0056B3),
+                      ),
+                    ),
+                    PopupMenuButton<String>(
+                      tooltip: 'เพิ่มเติม',
+                      onSelected: (v) {
+                        if (v == 'open') onOpen();
+                        if (v == 'edit') onEdit();
+                        if (v == 'delete') onDelete();
+                      },
+                      itemBuilder: (_) => [
+                        const PopupMenuItem(
+                          value: 'open',
+                          child: ListTile(
+                            dense: true,
+                            leading: Icon(Icons.play_arrow_rounded),
+                            title: Text('เริ่มเลือกเทมเพลต'),
+                          ),
+                        ),
+                        const PopupMenuItem(
+                          value: 'edit',
+                          child: ListTile(
+                            dense: true,
+                            leading: Icon(Icons.edit_rounded),
+                            title: Text('แก้ไขโปรไฟล์'),
+                          ),
+                        ),
+                        const PopupMenuDivider(),
+                        PopupMenuItem(
+                          value: 'delete',
+                          child: ListTile(
+                            dense: true,
+                            iconColor: Theme.of(context).colorScheme.error,
+                            textColor: Theme.of(context).colorScheme.error,
+                            leading: const Icon(Icons.delete_outline_rounded),
+                            title: const Text('ลบโปรไฟล์'),
+                          ),
                         ),
                       ],
+                      child: const Icon(Icons.more_vert_rounded),
                     ),
                   ],
-                );
-              },
+                ),
+              ],
             ),
           ),
         ),
       ),
     );
+  }
+}
+
+class _TrendData {
+  final List<double> points;
+  final double? latest;
+  final double? previous;
+  const _TrendData({
+    required this.points,
+    required this.latest,
+    required this.previous,
+  });
+  factory _TrendData.empty() =>
+      const _TrendData(points: [], latest: null, previous: null);
+}
+
+class _DeltaBadge extends StatelessWidget {
+  const _DeltaBadge({required this.value});
+  final double value;
+
+  @override
+  Widget build(BuildContext context) {
+    final up = value >= 0;
+    final color = up ? const Color(0xFF1B8C3B) : const Color(0xFFB82E2E);
+    final bg = up ? const Color(0x331B8C3B) : const Color(0x33B82E2E);
+    final icon = up ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 14, color: color),
+          Text(
+            value >= 0
+                ? '+${value.toStringAsFixed(2)}'
+                : value.toStringAsFixed(2),
+            style: TextStyle(
+              color: color,
+              fontWeight: FontWeight.w800,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Sparkline extends StatelessWidget {
+  const _Sparkline({
+    required this.points,
+    required this.stroke,
+    required this.fill,
+    required this.guideColor,
+  });
+
+  final List<double> points;
+  final Color stroke;
+  final Color fill;
+  final Color guideColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _SparkPainter(points, stroke, fill, guideColor),
+      size: Size.infinite,
+    );
+  }
+}
+
+class _SparkPainter extends CustomPainter {
+  _SparkPainter(this.points, this.stroke, this.fill, this.guideColor);
+
+  final List<double> points;
+  final Color stroke;
+  final Color fill;
+  final Color guideColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+
+    // เส้น guide ล่าง
+    final guide = Paint()
+      ..color = guideColor
+      ..strokeWidth = 1;
+    canvas.drawLine(Offset(0, h - 1), Offset(w, h - 1), guide);
+
+    if (w <= 0 || h <= 0 || points.isEmpty) return;
+
+    final minV = points.reduce((a, b) => a < b ? a : b);
+    final maxV = points.reduce((a, b) => a > b ? a : b);
+    final pad = (maxV - minV).abs() < 1e-6 ? 1.0 : (maxV - minV) * 0.2;
+    final lo = minV - pad;
+    final hi = maxV + pad;
+
+    final xStep = points.length <= 1 ? w : w / (points.length - 1);
+    final path = Path();
+    for (int i = 0; i < points.length; i++) {
+      final x = i * xStep;
+      final t = (points[i] - lo) / (hi - lo);
+      final y = h - (t.clamp(0.0, 1.0) * (h - 2)) - 1;
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+
+    // เงาใต้กราฟ
+    final area = Path.from(path)
+      ..lineTo(w, h)
+      ..lineTo(0, h)
+      ..close();
+
+    final fillPaint = Paint()
+      ..style = PaintingStyle.fill
+      ..color = fill;
+    canvas.drawPath(area, fillPaint);
+
+    final strokePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..color = stroke;
+    canvas.drawPath(path, strokePaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _SparkPainter oldDelegate) {
+    return oldDelegate.points != points ||
+        oldDelegate.stroke != stroke ||
+        oldDelegate.fill != fill ||
+        oldDelegate.guideColor != guideColor;
   }
 }
 
